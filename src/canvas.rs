@@ -6,9 +6,10 @@ pub struct Pos {
     pub y: usize,
 }
 
-pub const DEFAULT_WIDTH: usize = 176;
-pub const DEFAULT_HEIGHT: usize = 48;
+pub const DEFAULT_WIDTH: usize = 352;
+pub const DEFAULT_HEIGHT: usize = 96;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Canvas {
     cells: HashMap<Pos, char>,
     pub width: usize,
