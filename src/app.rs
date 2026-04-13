@@ -786,7 +786,7 @@ impl App {
                 if self.show_help {
                     match key.code {
                         KeyCode::Esc | KeyCode::F(1) => self.show_help = false,
-                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.show_help = false
                         }
                         _ => {}
@@ -794,7 +794,7 @@ impl App {
                     return;
                 }
 
-                if key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.show_help = !self.show_help;
                 } else if key.code == KeyCode::F(1) {
                     self.show_help = !self.show_help;

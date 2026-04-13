@@ -101,7 +101,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             " dartboard \u{00b7} lifted \u{00b7} Esc to cancel ".to_string()
         }
     } else {
-        format!(" dartboard \u{00b7} {} for help ", "^E")
+        format!(" dartboard \u{00b7} {} for help ", "^P")
     };
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -402,7 +402,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             ),
             help_entry_line("^C", "copy (x2=lift)", bottom_right_width as usize, key, desc),
             help_entry_line_with_key_width(
-                "^E",
+                "^P",
                 "help toggle",
                 bottom_far_right_width as usize,
                 6,
