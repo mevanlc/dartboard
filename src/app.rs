@@ -25,7 +25,7 @@ pub struct Selection {
     pub cursor: Pos,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Bounds {
     min_x: usize,
     max_x: usize,
@@ -57,16 +57,22 @@ impl Bounds {
 }
 
 #[derive(Debug, Clone)]
-struct Clipboard {
-    width: usize,
-    height: usize,
+pub struct Clipboard {
+    pub width: usize,
+    pub height: usize,
     cells: Vec<char>,
 }
 
 impl Clipboard {
-    fn get(&self, x: usize, y: usize) -> char {
+    pub fn get(&self, x: usize, y: usize) -> char {
         self.cells[y * self.width + x]
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct FloatingSelection {
+    pub clipboard: Clipboard,
+    pub transparent: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +94,9 @@ pub struct App {
     drag_origin: Option<Pos>,
     pan_drag: Option<PanDrag>,
     clipboard: Option<Clipboard>,
+    pub floating: Option<FloatingSelection>,
+    last_clip_bounds: Option<Bounds>,
+    paint_canvas_before: Option<Canvas>,
     undo_stack: Vec<Canvas>,
     redo_stack: Vec<Canvas>,
 }
@@ -106,6 +115,9 @@ impl App {
             drag_origin: None,
             pan_drag: None,
             clipboard: None,
+            floating: None,
+            last_clip_bounds: None,
+            paint_canvas_before: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -353,14 +365,125 @@ impl App {
     }
 
     fn copy_selection_or_cell(&mut self) {
+        if self.floating.is_some() {
+            self.toggle_float_transparency();
+            return;
+        }
         let bounds = self.selection_or_cursor_bounds();
+        if self.clipboard.is_some() && self.last_clip_bounds == Some(bounds) {
+            self.enter_floating(bounds, false);
+            return;
+        }
         self.clipboard = Some(self.capture_bounds(bounds));
+        self.last_clip_bounds = Some(bounds);
     }
 
     fn cut_selection_or_cell(&mut self) {
+        if self.floating.is_some() {
+            self.toggle_float_transparency();
+            return;
+        }
         let bounds = self.selection_or_cursor_bounds();
+        if self.clipboard.is_some() && self.last_clip_bounds == Some(bounds) {
+            self.enter_floating(bounds, false);
+            return;
+        }
         self.clipboard = Some(self.capture_bounds(bounds));
+        self.last_clip_bounds = Some(bounds);
         self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ' '));
+    }
+
+    fn enter_floating(&mut self, bounds: Bounds, transparent: bool) {
+        if let Some(ref clipboard) = self.clipboard {
+            self.floating = Some(FloatingSelection {
+                clipboard: clipboard.clone(),
+                transparent,
+            });
+            self.cursor = Pos {
+                x: bounds.min_x,
+                y: bounds.min_y,
+            };
+            self.clear_selection();
+            self.last_clip_bounds = None;
+        }
+    }
+
+    fn toggle_float_transparency(&mut self) {
+        if let Some(ref mut floating) = self.floating {
+            floating.transparent = !floating.transparent;
+        }
+    }
+
+    fn stamp_floating(&mut self) {
+        let Some(floating) = self.floating.take() else {
+            return;
+        };
+        let pos = self.cursor;
+        let transparent = floating.transparent;
+        let clipboard = floating.clipboard.clone();
+        self.apply_canvas_edit(|canvas| {
+            for y in 0..clipboard.height {
+                for x in 0..clipboard.width {
+                    let ch = clipboard.get(x, y);
+                    if transparent && ch == ' ' {
+                        continue;
+                    }
+                    let target_x = pos.x + x;
+                    let target_y = pos.y + y;
+                    if target_x >= canvas.width || target_y >= canvas.height {
+                        continue;
+                    }
+                    canvas.set(Pos { x: target_x, y: target_y }, ch);
+                }
+            }
+        });
+        self.floating = Some(floating);
+    }
+
+    fn stamp_onto_canvas(&mut self) {
+        let Some(floating) = self.floating.take() else {
+            return;
+        };
+        {
+            let pos = self.cursor;
+            let cb = &floating.clipboard;
+            let transparent = floating.transparent;
+            for y in 0..cb.height {
+                for x in 0..cb.width {
+                    let ch = cb.get(x, y);
+                    if transparent && ch == ' ' {
+                        continue;
+                    }
+                    let tx = pos.x + x;
+                    let ty = pos.y + y;
+                    if tx < self.canvas.width && ty < self.canvas.height {
+                        self.canvas.set(Pos { x: tx, y: ty }, ch);
+                    }
+                }
+            }
+        }
+        self.floating = Some(floating);
+    }
+
+    fn begin_paint_stroke(&mut self) {
+        self.paint_canvas_before = Some(self.canvas.clone());
+    }
+
+    fn end_paint_stroke(&mut self) {
+        if let Some(before) = self.paint_canvas_before.take() {
+            if self.canvas != before {
+                self.undo_stack.push(before);
+                if self.undo_stack.len() > UNDO_DEPTH_CAP {
+                    self.undo_stack.remove(0);
+                }
+                self.redo_stack.clear();
+            }
+        }
+    }
+
+    fn dismiss_floating(&mut self) {
+        self.end_paint_stroke();
+        self.floating = None;
     }
 
     fn paste_clipboard(&mut self) {
@@ -685,51 +808,83 @@ impl App {
                 }
 
                 let canvas_pos = self.mouse_to_canvas(mouse.column, mouse.row);
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Right) => {
-                        if self.viewport_contains(mouse.column, mouse.row) {
-                            self.begin_pan(mouse.column, mouse.row);
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(pos) = canvas_pos {
-                            let extend_selection = mouse.modifiers.contains(KeyModifiers::ALT)
-                                && self.selection_anchor.is_some();
 
-                            if extend_selection {
-                                if let Some(anchor) = self.selection_anchor {
+                if self.floating.is_some() {
+                    match mouse.kind {
+                        MouseEventKind::Moved => {
+                            if let Some(pos) = canvas_pos {
+                                self.cursor = pos;
+                            }
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(pos) = canvas_pos {
+                                self.cursor = pos;
+                                self.begin_paint_stroke();
+                                self.stamp_onto_canvas();
+                            }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let Some(pos) = canvas_pos {
+                                self.cursor = pos;
+                                self.stamp_onto_canvas();
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            self.end_paint_stroke();
+                        }
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            self.dismiss_floating();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            if self.viewport_contains(mouse.column, mouse.row) {
+                                self.begin_pan(mouse.column, mouse.row);
+                            }
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(pos) = canvas_pos {
+                                let extend_selection =
+                                    mouse.modifiers.contains(KeyModifiers::ALT)
+                                        && self.selection_anchor.is_some();
+
+                                if extend_selection {
+                                    if let Some(anchor) = self.selection_anchor {
+                                        self.mode = Mode::Select;
+                                        self.cursor = pos;
+                                        self.drag_origin = Some(anchor);
+                                    }
+                                } else {
+                                    if self.mode.is_selecting() {
+                                        self.clear_selection();
+                                    }
+                                    self.cursor = pos;
+                                    self.drag_origin = Some(pos);
+                                }
+                            }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let (Some(origin), Some(pos)) = (self.drag_origin, canvas_pos) {
+                                if pos != origin || self.mode.is_selecting() {
+                                    self.selection_anchor = Some(origin);
                                     self.mode = Mode::Select;
                                     self.cursor = pos;
-                                    self.drag_origin = Some(anchor);
                                 }
-                            } else {
-                                if self.mode.is_selecting() {
-                                    self.clear_selection();
-                                }
-                                self.cursor = pos;
-                                self.drag_origin = Some(pos);
                             }
                         }
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        if let (Some(origin), Some(pos)) = (self.drag_origin, canvas_pos) {
-                            if pos != origin || self.mode.is_selecting() {
-                                self.selection_anchor = Some(origin);
-                                self.mode = Mode::Select;
-                                self.cursor = pos;
-                            }
+                        MouseEventKind::Drag(MouseButton::Right) => {
+                            self.drag_pan(mouse.column, mouse.row);
                         }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            self.drag_origin = None;
+                        }
+                        MouseEventKind::Up(MouseButton::Right) => {
+                            self.end_pan();
+                        }
+                        _ => {}
                     }
-                    MouseEventKind::Drag(MouseButton::Right) => {
-                        self.drag_pan(mouse.column, mouse.row);
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        self.drag_origin = None;
-                    }
-                    MouseEventKind::Up(MouseButton::Right) => {
-                        self.end_pan();
-                    }
-                    _ => {}
                 }
             }
             Event::Paste(data) => {
@@ -744,6 +899,50 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if self.floating.is_some() {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::META);
+
+            match key.code {
+                KeyCode::Char('c') | KeyCode::Char('x') if ctrl => {
+                    self.toggle_float_transparency();
+                    return;
+                }
+                KeyCode::Char('v') if ctrl => {
+                    self.stamp_floating();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.dismiss_floating();
+                    return;
+                }
+                KeyCode::Up if !ctrl && !alt => {
+                    self.cursor.y = self.cursor.y.saturating_sub(1);
+                    return;
+                }
+                KeyCode::Down if !ctrl && !alt => {
+                    if self.cursor.y < self.canvas.height.saturating_sub(1) {
+                        self.cursor.y += 1;
+                    }
+                    return;
+                }
+                KeyCode::Left if !ctrl && !alt => {
+                    self.cursor.x = self.cursor.x.saturating_sub(1);
+                    return;
+                }
+                KeyCode::Right if !ctrl && !alt => {
+                    if self.cursor.x < self.canvas.width.saturating_sub(1) {
+                        self.cursor.x += 1;
+                    }
+                    return;
+                }
+                _ if alt => {} // Keep floating, let alt handler process (e.g. panning)
+                _ => {
+                    self.dismiss_floating();
+                }
+            }
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && self.handle_control_key(key) {
             return;
         }
@@ -1073,5 +1272,296 @@ mod tests {
         assert_eq!(app.selection_anchor, Some(Pos { x: 8, y: 7 }));
         assert_eq!(app.cursor, Pos { x: 2, y: 3 });
         assert!(app.mode.is_selecting());
+    }
+
+    #[test]
+    fn double_copy_enters_floating_mode() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 1, y: 1 }, 'A');
+        app.canvas.set(Pos { x: 2, y: 1 }, 'B');
+        app.selection_anchor = Some(Pos { x: 1, y: 1 });
+        app.cursor = Pos { x: 2, y: 1 };
+        app.mode = Mode::Select;
+
+        // First copy: captures clipboard
+        app.copy_selection_or_cell();
+        assert!(app.clipboard.is_some());
+        assert!(app.floating.is_none());
+
+        // Second copy on same selection: enters floating
+        app.copy_selection_or_cell();
+        assert!(app.floating.is_some());
+        assert_eq!(app.cursor, Pos { x: 1, y: 1 });
+        assert!(!app.mode.is_selecting());
+        // Original content untouched
+        assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), 'A');
+        assert_eq!(app.canvas.get(Pos { x: 2, y: 1 }), 'B');
+    }
+
+    #[test]
+    fn double_cut_enters_floating_mode() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 1, y: 1 }, 'X');
+        app.canvas.set(Pos { x: 2, y: 1 }, 'Y');
+        app.selection_anchor = Some(Pos { x: 1, y: 1 });
+        app.cursor = Pos { x: 2, y: 1 };
+        app.mode = Mode::Select;
+
+        // First cut: captures and clears
+        app.cut_selection_or_cell();
+        assert!(app.clipboard.is_some());
+        assert!(app.floating.is_none());
+        assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), ' ');
+        assert_eq!(app.canvas.get(Pos { x: 2, y: 1 }), ' ');
+
+        // Second cut on same selection: enters floating (no double-clear)
+        app.cut_selection_or_cell();
+        assert!(app.floating.is_some());
+    }
+
+    #[test]
+    fn stamp_floating_writes_to_canvas() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.canvas.set(Pos { x: 1, y: 0 }, 'B');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 1, y: 0 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell(); // enter floating
+
+        // Move float to new position
+        app.cursor = Pos { x: 5, y: 3 };
+
+        // Stamp via Ctrl+V
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+        // Float persists for repeated stamping
+        assert!(app.floating.is_some());
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 3 }), 'A');
+        assert_eq!(app.canvas.get(Pos { x: 6, y: 3 }), 'B');
+    }
+
+    #[test]
+    fn esc_dismisses_float_without_stamping() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'Z');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 0, y: 0 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell(); // enter floating
+
+        app.cursor = Pos { x: 5, y: 5 };
+
+        // Dismiss with Esc
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.floating.is_none());
+        // Clipboard still intact
+        assert!(app.clipboard.is_some());
+        // Nothing stamped at (5,5)
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), ' ');
+    }
+
+    #[test]
+    fn arrow_keys_nudge_floating_position() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 3, y: 3 }, 'Q');
+        app.selection_anchor = Some(Pos { x: 3, y: 3 });
+        app.cursor = Pos { x: 3, y: 3 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell(); // floating at (3,3)
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        assert!(app.floating.is_some());
+        assert_eq!(app.cursor, Pos { x: 4, y: 4 });
+    }
+
+    #[test]
+    fn mouse_click_stamps_floating() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 20, 10));
+        app.canvas.set(Pos { x: 0, y: 0 }, 'M');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 0, y: 0 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell(); // enter floating
+
+        // Left click stamps at click position
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 7,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 7,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        // Float persists for repeated stamping
+        assert!(app.floating.is_some());
+        assert_eq!(app.canvas.get(Pos { x: 7, y: 4 }), 'M');
+    }
+
+    #[test]
+    fn different_bounds_copy_does_not_float() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.canvas.set(Pos { x: 1, y: 0 }, 'B');
+
+        // Copy single cell
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+
+        // Copy different cell
+        app.cursor = Pos { x: 1, y: 0 };
+        app.copy_selection_or_cell();
+
+        assert!(app.floating.is_none());
+    }
+
+    #[test]
+    fn triple_copy_toggles_transparency() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 0, y: 0 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell(); // 1st: clipboard
+        app.copy_selection_or_cell(); // 2nd: float (opaque)
+
+        assert!(app.floating.is_some());
+        assert!(!app.floating.as_ref().unwrap().transparent);
+
+        // 3rd copy while floating: toggle to transparent
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.floating.is_some());
+        assert!(app.floating.as_ref().unwrap().transparent);
+
+        // 4th: toggle back to opaque
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.floating.as_ref().unwrap().transparent);
+    }
+
+    #[test]
+    fn transparent_stamp_preserves_underlying_content() {
+        let mut app = App::new();
+        // Place "A B" in clipboard (A, space, B)
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.canvas.set(Pos { x: 2, y: 0 }, 'B');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 2, y: 0 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell(); // opaque float
+
+        // Toggle to transparent
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.floating.as_ref().unwrap().transparent);
+
+        // Place existing content at stamp target
+        app.canvas.set(Pos { x: 5, y: 5 }, 'Z');
+
+        // Move float and stamp
+        app.cursor = Pos { x: 4, y: 5 };
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+        // A stamped at (4,5), space at (5,5) skipped so Z preserved, B at (6,5)
+        assert_eq!(app.canvas.get(Pos { x: 4, y: 5 }), 'A');
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), 'Z');
+        assert_eq!(app.canvas.get(Pos { x: 6, y: 5 }), 'B');
+    }
+
+    #[test]
+    fn drag_paints_like_brush_with_single_undo() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 20, 10));
+        app.canvas.set(Pos { x: 0, y: 0 }, 'X');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 0, y: 0 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell(); // floating
+
+        // Paint stroke: click, drag to two positions, release
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 7,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 7,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        // All three positions stamped
+        assert_eq!(app.canvas.get(Pos { x: 3, y: 2 }), 'X');
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 2 }), 'X');
+        assert_eq!(app.canvas.get(Pos { x: 7, y: 2 }), 'X');
+
+        // Float still active
+        assert!(app.floating.is_some());
+
+        // Single undo reverts the entire paint stroke
+        app.undo();
+        assert_eq!(app.canvas.get(Pos { x: 3, y: 2 }), ' ');
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 2 }), ' ');
+        assert_eq!(app.canvas.get(Pos { x: 7, y: 2 }), ' ');
+    }
+
+    #[test]
+    fn repeated_ctrl_v_stamps_create_separate_undos() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'Q');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 0, y: 0 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell(); // floating
+
+        // Stamp at two positions
+        app.cursor = Pos { x: 3, y: 3 };
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        app.cursor = Pos { x: 6, y: 6 };
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.canvas.get(Pos { x: 3, y: 3 }), 'Q');
+        assert_eq!(app.canvas.get(Pos { x: 6, y: 6 }), 'Q');
+
+        // Undo only the second stamp
+        app.undo();
+        assert_eq!(app.canvas.get(Pos { x: 3, y: 3 }), 'Q');
+        assert_eq!(app.canvas.get(Pos { x: 6, y: 6 }), ' ');
     }
 }

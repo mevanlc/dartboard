@@ -54,14 +54,55 @@ impl<'a> Widget for CanvasWidget<'a> {
                 }
             }
         }
+
+        if let Some(ref floating) = self.app.floating {
+            let cb = &floating.clipboard;
+            let fx = self.app.cursor.x;
+            let fy = self.app.cursor.y;
+
+            for cy in 0..cb.height {
+                for cx in 0..cb.width {
+                    let canvas_x = fx + cx;
+                    let canvas_y = fy + cy;
+
+                    if canvas_x >= cw || canvas_y >= ch || canvas_x < ox || canvas_y < oy {
+                        continue;
+                    }
+
+                    let dx = (canvas_x - ox) as u16;
+                    let dy = (canvas_y - oy) as u16;
+
+                    if dx >= area.width || dy >= area.height {
+                        continue;
+                    }
+
+                    let fc = cb.get(cx, cy);
+                    if floating.transparent && fc == ' ' {
+                        continue;
+                    }
+                    let cell = &mut buf[(area.x + dx, area.y + dy)];
+                    cell.set_char(fc).set_bg(theme::FLOAT_BG);
+                    if fc != ' ' {
+                        cell.set_fg(theme::TEXT);
+                    }
+                }
+            }
+        }
     }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    let help_hint = "^E";
-    let title = format!(" dartboard \u{00b7} {} for help ", help_hint);
+    let title = if let Some(ref floating) = app.floating {
+        if floating.transparent {
+            " dartboard \u{00b7} lifted (see-thru) \u{00b7} Esc to cancel ".to_string()
+        } else {
+            " dartboard \u{00b7} lifted \u{00b7} Esc to cancel ".to_string()
+        }
+    } else {
+        format!(" dartboard \u{00b7} {} for help ", "^E")
+    };
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -341,7 +382,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
                 key,
                 desc,
             ),
-            help_entry_line("^X", "cut", bottom_right_width as usize, key, desc),
+            help_entry_line("^X", "cut (x2=lift)", bottom_right_width as usize, key, desc),
             help_entry_line_with_key_width(
                 "^Z ^R",
                 "undo / redo",
@@ -359,7 +400,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
                 key,
                 desc,
             ),
-            help_entry_line("^C", "copy", bottom_right_width as usize, key, desc),
+            help_entry_line("^C", "copy (x2=lift)", bottom_right_width as usize, key, desc),
             help_entry_line_with_key_width(
                 "^E",
                 "help toggle",
@@ -377,7 +418,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
                 key,
                 desc,
             ),
-            help_entry_line("^V", "paste", bottom_right_width as usize, key, desc),
+            help_entry_line("^V", "paste / stamp", bottom_right_width as usize, key, desc),
             help_entry_line_with_key_width(
                 "^Q",
                 "quit",
