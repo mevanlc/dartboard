@@ -7,13 +7,13 @@
 
 ## Box drawing
 - Draw rectangles with box-drawing characters (single/double/rounded)
-- Could be a visual-block operation: select region, apply box style
+- Could be a block-selection operation: select region, apply box style
 
 ## Networking (shared canvas)
 - Canvas data model is already separated for this
 - WebSocket or similar for real-time sync
 - CRDT or OT for conflict resolution on concurrent edits
-- Cursor presence / awareness (see other users' cursors)
+- Per-user insertion points and selections (see other users' cursors/selections)
 - Room/session management
 
 ## Fill tool
@@ -21,7 +21,7 @@
 - Bounded by non-space characters
 
 ## Copy/paste
-- Yank visual selection to a clipboard buffer
+- Copy the current selection, or the current cell when nothing is selected, to a clipboard buffer
 - Paste buffer at cursor position
 - System clipboard integration (OSC 52)
 

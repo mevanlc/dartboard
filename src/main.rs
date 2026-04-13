@@ -9,12 +9,12 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 
-use app::{App, Mode};
+use app::App;
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
@@ -42,14 +42,7 @@ fn main() -> io::Result<()> {
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
-
-        let cursor_style = match app.mode {
-            Mode::Normal => SetCursorStyle::SteadyBlock,
-            Mode::Insert => SetCursorStyle::BlinkingBar,
-            Mode::Replace => SetCursorStyle::SteadyUnderScore,
-            _ => SetCursorStyle::SteadyBlock,
-        };
-        execute!(io::stdout(), cursor_style)?;
+        execute!(io::stdout(), SetCursorStyle::SteadyUnderScore)?;
 
         let event = crossterm::event::read()?;
         app.handle_event(event);

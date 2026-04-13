@@ -17,7 +17,7 @@ impl<'a> Widget for CanvasWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let cw = self.app.canvas.width;
         let ch = self.app.canvas.height;
-        let has_selection = self.app.visual_anchor.is_some() && self.app.mode.is_visual();
+        let has_selection = self.app.selection_anchor.is_some() && self.app.mode.is_selecting();
 
         for dy in 0..area.height {
             for dx in 0..area.width {
@@ -48,13 +48,8 @@ impl<'a> Widget for CanvasWidget<'a> {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // Title with mode
-    let help_hint = "^P";
-    let title = format!(
-        " ascii artboard \u{00b7} {} for help \u{00b7} {} ",
-        help_hint,
-        app.mode_label()
-    );
+    let help_hint = "^E";
+    let title = format!(" dartboard \u{00b7} {} for help ", help_hint);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -76,17 +71,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if app.show_help {
-        if app.simple_mode {
-            render_simple_help(frame, area);
-        } else {
-            render_help(frame, area);
-        }
+        render_help(frame, area);
     }
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
-    let width = 56u16.min(area.width.saturating_sub(4));
-    let height = 42u16.min(area.height.saturating_sub(2));
+    let width = 58u16.min(area.width.saturating_sub(4));
+    let height = 31u16.min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let popup = Rect::new(x, y, width, height);
@@ -98,89 +89,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::ACCENT))
         .title(Span::styled(
-            " Keyboard Help ",
-            Style::default().fg(theme::HIGHLIGHT),
-        ));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let heading = Style::default()
-        .fg(theme::ACCENT)
-        .add_modifier(Modifier::BOLD);
-    let sep = Style::default().fg(theme::MUTED_GREATER);
-    let key = Style::default().fg(theme::HIGHLIGHT);
-    let desc = Style::default().fg(theme::MUTED);
-
-    let text = Text::from(vec![
-        Line::from(Span::styled("Normal Mode", heading)),
-        Line::from(Span::styled("──────────────────────────────────────", sep)),
-        hline("h j k l / arrows", "move cursor", key, desc),
-        hline("w W  e E  b B", "word motions", key, desc),
-        hline("0  $  ^", "line start / end / first char", key, desc),
-        hline("i", "insert mode at cursor", key, desc),
-        hline("a / A", "append after cursor / at EOL", key, desc),
-        hline("r + char", "replace one char at cursor", key, desc),
-        hline("R", "replace mode (overwrite)", key, desc),
-        hline("x / X", "delete at / before cursor", key, desc),
-        hline("v / V / ^V", "visual / line / block select", key, desc),
-        hline("gv", "recall last visual selection", key, desc),
-        hline("?", "toggle this help", key, desc),
-        hline("q / ^Q", "quit", key, desc),
-        Line::from(""),
-        Line::from(Span::styled("Insert Mode", heading)),
-        Line::from(Span::styled("──────────────────────────────────────", sep)),
-        hline("<type>", "insert char, push text right", key, desc),
-        hline("Backspace / Delete", "delete & pull text", key, desc),
-        hline("Enter", "push column down at cursor", key, desc),
-        hline("^J / Shift+Enter", "push column down, cursor rides", key, desc),
-        hline("Esc", "back to normal", key, desc),
-        Line::from(""),
-        Line::from(Span::styled("Replace Mode", heading)),
-        Line::from(Span::styled("──────────────────────────────────────", sep)),
-        hline("<type>", "overwrite char at cursor", key, desc),
-        hline("Enter", "clear cell, move down", key, desc),
-        hline("Esc", "back to normal", key, desc),
-        Line::from(""),
-        Line::from(Span::styled("Visual Modes", heading)),
-        Line::from(Span::styled("──────────────────────────────────────", sep)),
-        hline("move", "extend selection", key, desc),
-        hline("r + char", "fill selection with char", key, desc),
-        hline("Bksp / Del", "clear selected cells", key, desc),
-        hline("v / V / ^V", "same: reset  diff: convert", key, desc),
-        hline("gv / gV", "selection history back / fwd", key, desc),
-        hline("Esc", "exit visual (gv to recall)", key, desc),
-        Line::from(""),
-        Line::from(Span::styled("Canvas (any mode)", heading)),
-        Line::from(Span::styled("──────────────────────────────────────", sep)),
-        hline("^D", "push column down at cursor", key, desc),
-        hline("^U", "pull column up at cursor", key, desc),
-        hline("^J", "push column down, cursor rides", key, desc),
-        Line::from(""),
-        Line::from(Span::styled("──────────────────────────────────────", sep)),
-        hline("^G", "switch to simple mode", key, desc),
-        hline("^P", "toggle this help", key, desc),
-        hline("^Q", "quit", key, desc),
-    ]);
-
-    frame.render_widget(Paragraph::new(text), inner);
-}
-
-fn render_simple_help(frame: &mut Frame, area: Rect) {
-    let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 28u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2 + area.x;
-    let y = (area.height.saturating_sub(height)) / 2 + area.y;
-    let popup = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .title(Span::styled(
-            " Help (simple mode) ",
+            " Help ",
             Style::default().fg(theme::HIGHLIGHT),
         ));
 
@@ -196,7 +105,10 @@ fn render_simple_help(frame: &mut Frame, area: Rect) {
 
     let text = Text::from(vec![
         Line::from(Span::styled("Drawing", heading)),
-        Line::from(Span::styled("────────────────────────────────", sep)),
+        Line::from(Span::styled(
+            "────────────────────────────────────────",
+            sep,
+        )),
         hline("<type>", "draw character", key, desc),
         hline("Backspace", "erase backward", key, desc),
         hline("Delete", "erase at cursor", key, desc),
@@ -206,21 +118,43 @@ fn render_simple_help(frame: &mut Frame, area: Rect) {
         hline("Enter", "move down", key, desc),
         Line::from(""),
         Line::from(Span::styled("Selection", heading)),
-        Line::from(Span::styled("────────────────────────────────", sep)),
+        Line::from(Span::styled(
+            "────────────────────────────────────────",
+            sep,
+        )),
         hline("Shift+arrows", "create / extend selection", key, desc),
         hline("click+drag", "block select with mouse", key, desc),
         hline("<type>", "fill selection", key, desc),
         hline("Bksp / Del", "clear selection", key, desc),
         hline("Esc / arrow", "cancel selection", key, desc),
         Line::from(""),
-        Line::from(Span::styled("Canvas", heading)),
-        Line::from(Span::styled("────────────────────────────────", sep)),
-        hline("^D", "push column down", key, desc),
-        hline("^U", "pull column up", key, desc),
+        Line::from(Span::styled("Transform", heading)),
+        Line::from(Span::styled(
+            "────────────────────────────────────────",
+            sep,
+        )),
+        hline("^H ^J ^K ^L", "push left/down/up/right", key, desc),
+        hline("^Y ^U ^I ^O", "pull from left/down/up/right", key, desc),
+        hline("^Space", "smart fill selection or cell", key, desc),
+        hline("^B", "draw ASCII border around selection", key, desc),
         Line::from(""),
-        Line::from(Span::styled("────────────────────────────────", sep)),
-        hline("^G", "switch to vi mode", key, desc),
-        hline("^P", "toggle this help", key, desc),
+        Line::from(Span::styled("Clipboard", heading)),
+        Line::from(Span::styled(
+            "────────────────────────────────────────",
+            sep,
+        )),
+        hline(
+            "^C / ^X / ^V",
+            "copy / cut / paste cell or selection",
+            key,
+            desc,
+        ),
+        Line::from(""),
+        Line::from(Span::styled(
+            "────────────────────────────────────────",
+            sep,
+        )),
+        hline("^E", "toggle this help", key, desc),
         hline("^Q", "quit", key, desc),
     ]);
 

@@ -1,5 +1,5 @@
 [package]
-name = "aartboard"
+name = "dartboard"
 version = "0.1.0"
 edition = "2021"
 

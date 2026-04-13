@@ -45,26 +45,24 @@ impl Canvas {
         self.cells.iter()
     }
 
-    pub fn row_occupied(&self, y: usize) -> Vec<usize> {
-        let mut xs: Vec<usize> = self.cells.keys().filter(|p| p.y == y).map(|p| p.x).collect();
+    pub fn push_left(&mut self, y: usize, to_x: usize) {
+        let mut xs: Vec<usize> = self
+            .cells
+            .keys()
+            .filter(|p| p.y == y && p.x <= to_x)
+            .map(|p| p.x)
+            .collect();
         xs.sort();
-        xs
+        for x in xs {
+            if let Some(ch) = self.cells.remove(&Pos { x, y }) {
+                if x > 0 {
+                    self.cells.insert(Pos { x: x - 1, y }, ch);
+                }
+            }
+        }
     }
 
-    pub fn row_content(&self, y: usize) -> Vec<char> {
-        let positions = self.row_occupied(y);
-        if positions.is_empty() {
-            return vec![];
-        }
-        let max_x = *positions.last().unwrap();
-        let mut row = vec![' '; max_x + 1];
-        for x in positions {
-            row[x] = self.get(Pos { x, y });
-        }
-        row
-    }
-
-    pub fn shift_right(&mut self, y: usize, from_x: usize) {
+    pub fn push_right(&mut self, y: usize, from_x: usize) {
         let mut xs: Vec<usize> = self
             .cells
             .keys()
@@ -79,8 +77,24 @@ impl Canvas {
         }
     }
 
-    /// Shift all cells in column `x` at row >= `from_y` down by one row.
-    pub fn shift_col_down(&mut self, x: usize, from_y: usize) {
+    pub fn push_up(&mut self, x: usize, to_y: usize) {
+        let mut ys: Vec<usize> = self
+            .cells
+            .keys()
+            .filter(|p| p.x == x && p.y <= to_y)
+            .map(|p| p.y)
+            .collect();
+        ys.sort();
+        for y in ys {
+            if let Some(ch) = self.cells.remove(&Pos { x, y }) {
+                if y > 0 {
+                    self.cells.insert(Pos { x, y: y - 1 }, ch);
+                }
+            }
+        }
+    }
+
+    pub fn push_down(&mut self, x: usize, from_y: usize) {
         let mut ys: Vec<usize> = self
             .cells
             .keys()
@@ -95,9 +109,55 @@ impl Canvas {
         }
     }
 
-    /// Pull all cells in column `x` at row > `from_y` up by one row.
-    /// The cell at `from_y` is overwritten (consumed).
-    pub fn shift_col_up(&mut self, x: usize, from_y: usize) {
+    pub fn pull_from_left(&mut self, y: usize, to_x: usize) {
+        self.cells.remove(&Pos { x: to_x, y });
+        let mut xs: Vec<usize> = self
+            .cells
+            .keys()
+            .filter(|p| p.y == y && p.x < to_x)
+            .map(|p| p.x)
+            .collect();
+        xs.sort_by(|a, b| b.cmp(a));
+        for x in xs {
+            if let Some(ch) = self.cells.remove(&Pos { x, y }) {
+                self.cells.insert(Pos { x: x + 1, y }, ch);
+            }
+        }
+    }
+
+    pub fn pull_from_right(&mut self, y: usize, from_x: usize) {
+        self.cells.remove(&Pos { x: from_x, y });
+        let mut xs: Vec<usize> = self
+            .cells
+            .keys()
+            .filter(|p| p.y == y && p.x > from_x)
+            .map(|p| p.x)
+            .collect();
+        xs.sort();
+        for x in xs {
+            if let Some(ch) = self.cells.remove(&Pos { x, y }) {
+                self.cells.insert(Pos { x: x - 1, y }, ch);
+            }
+        }
+    }
+
+    pub fn pull_from_up(&mut self, x: usize, to_y: usize) {
+        self.cells.remove(&Pos { x, y: to_y });
+        let mut ys: Vec<usize> = self
+            .cells
+            .keys()
+            .filter(|p| p.x == x && p.y < to_y)
+            .map(|p| p.y)
+            .collect();
+        ys.sort_by(|a, b| b.cmp(a));
+        for y in ys {
+            if let Some(ch) = self.cells.remove(&Pos { x, y }) {
+                self.cells.insert(Pos { x, y: y + 1 }, ch);
+            }
+        }
+    }
+
+    pub fn pull_from_down(&mut self, x: usize, from_y: usize) {
         self.cells.remove(&Pos { x, y: from_y });
         let mut ys: Vec<usize> = self
             .cells
@@ -112,19 +172,49 @@ impl Canvas {
             }
         }
     }
+}
 
-    pub fn shift_left(&mut self, y: usize, from_x: usize) {
-        let mut xs: Vec<usize> = self
-            .cells
-            .keys()
-            .filter(|p| p.y == y && p.x > from_x)
-            .map(|p| p.x)
-            .collect();
-        xs.sort();
-        for x in xs {
-            if let Some(ch) = self.cells.remove(&Pos { x, y }) {
-                self.cells.insert(Pos { x: x - 1, y }, ch);
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::{Canvas, Pos};
+
+    #[test]
+    fn row_push_and_pull_are_directional() {
+        let mut canvas = Canvas::new();
+        canvas.set(Pos { x: 0, y: 0 }, 'A');
+        canvas.set(Pos { x: 1, y: 0 }, 'B');
+        canvas.set(Pos { x: 2, y: 0 }, 'C');
+        canvas.set(Pos { x: 3, y: 0 }, 'D');
+
+        canvas.push_left(0, 2);
+        assert_eq!(canvas.get(Pos { x: 0, y: 0 }), 'B');
+        assert_eq!(canvas.get(Pos { x: 1, y: 0 }), 'C');
+        assert_eq!(canvas.get(Pos { x: 2, y: 0 }), ' ');
+        assert_eq!(canvas.get(Pos { x: 3, y: 0 }), 'D');
+
+        canvas.pull_from_right(0, 1);
+        assert_eq!(canvas.get(Pos { x: 0, y: 0 }), 'B');
+        assert_eq!(canvas.get(Pos { x: 1, y: 0 }), ' ');
+        assert_eq!(canvas.get(Pos { x: 2, y: 0 }), 'D');
+    }
+
+    #[test]
+    fn column_push_and_pull_are_directional() {
+        let mut canvas = Canvas::new();
+        canvas.set(Pos { x: 0, y: 0 }, 'A');
+        canvas.set(Pos { x: 0, y: 1 }, 'B');
+        canvas.set(Pos { x: 0, y: 2 }, 'C');
+        canvas.set(Pos { x: 0, y: 3 }, 'D');
+
+        canvas.push_up(0, 2);
+        assert_eq!(canvas.get(Pos { x: 0, y: 0 }), 'B');
+        assert_eq!(canvas.get(Pos { x: 0, y: 1 }), 'C');
+        assert_eq!(canvas.get(Pos { x: 0, y: 2 }), ' ');
+        assert_eq!(canvas.get(Pos { x: 0, y: 3 }), 'D');
+
+        canvas.pull_from_down(0, 1);
+        assert_eq!(canvas.get(Pos { x: 0, y: 0 }), 'B');
+        assert_eq!(canvas.get(Pos { x: 0, y: 1 }), ' ');
+        assert_eq!(canvas.get(Pos { x: 0, y: 2 }), 'D');
     }
 }
