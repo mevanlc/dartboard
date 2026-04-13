@@ -1,6 +1,9 @@
+use std::io;
+
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use crossterm::{clipboard::CopyToClipboard, execute};
 use ratatui::layout::Rect;
 
 use crate::canvas::{Canvas, Pos};
@@ -342,6 +345,20 @@ impl App {
             .unwrap_or_else(|| Bounds::single(self.cursor))
     }
 
+    fn full_canvas_bounds(&self) -> Bounds {
+        Bounds {
+            min_x: 0,
+            max_x: self.canvas.width.saturating_sub(1),
+            min_y: 0,
+            max_y: self.canvas.height.saturating_sub(1),
+        }
+    }
+
+    fn system_clipboard_bounds(&self) -> Bounds {
+        self.selection_bounds()
+            .unwrap_or_else(|| self.full_canvas_bounds())
+    }
+
     fn fill_bounds_on(canvas: &mut Canvas, bounds: Bounds, ch: char) {
         for y in bounds.min_y..=bounds.max_y {
             for x in bounds.min_x..=bounds.max_x {
@@ -376,6 +393,28 @@ impl App {
         }
         self.clipboard = Some(self.capture_bounds(bounds));
         self.last_clip_bounds = Some(bounds);
+    }
+
+    fn export_bounds_as_text(&self, bounds: Bounds) -> String {
+        let mut text = String::with_capacity(bounds.width() * bounds.height() + bounds.height());
+        for y in bounds.min_y..=bounds.max_y {
+            for x in bounds.min_x..=bounds.max_x {
+                text.push(self.canvas.get(Pos { x, y }));
+            }
+            if y != bounds.max_y {
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    fn export_system_clipboard_text(&self) -> String {
+        self.export_bounds_as_text(self.system_clipboard_bounds())
+    }
+
+    fn copy_to_system_clipboard(&self) {
+        let text = self.export_system_clipboard_text();
+        let _ = execute!(io::stdout(), CopyToClipboard::to_clipboard_from(text));
     }
 
     fn cut_selection_or_cell(&mut self) {
@@ -765,6 +804,7 @@ impl App {
 
     fn handle_alt_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
+            KeyCode::Char('c') => self.copy_to_system_clipboard(),
             KeyCode::Left => self.pan_by(-1, 0),
             KeyCode::Right => self.pan_by(1, 0),
             KeyCode::Up => self.pan_by(0, -1),
@@ -1563,5 +1603,32 @@ mod tests {
         app.undo();
         assert_eq!(app.canvas.get(Pos { x: 3, y: 3 }), 'Q');
         assert_eq!(app.canvas.get(Pos { x: 6, y: 6 }), ' ');
+    }
+
+    #[test]
+    fn system_clipboard_export_uses_selection_when_present() {
+        let mut app = App::new();
+        app.canvas.width = 4;
+        app.canvas.height = 3;
+        app.canvas.set(Pos { x: 1, y: 1 }, 'A');
+        app.canvas.set(Pos { x: 2, y: 1 }, 'B');
+        app.canvas.set(Pos { x: 1, y: 2 }, 'C');
+        app.canvas.set(Pos { x: 2, y: 2 }, 'D');
+        app.selection_anchor = Some(Pos { x: 1, y: 1 });
+        app.cursor = Pos { x: 2, y: 2 };
+        app.mode = Mode::Select;
+
+        assert_eq!(app.export_system_clipboard_text(), "AB\nCD");
+    }
+
+    #[test]
+    fn system_clipboard_export_uses_full_canvas_without_selection() {
+        let mut app = App::new();
+        app.canvas.width = 3;
+        app.canvas.height = 2;
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.canvas.set(Pos { x: 2, y: 1 }, 'Z');
+
+        assert_eq!(app.export_system_clipboard_text(), "A  \n  Z");
     }
 }
