@@ -7,6 +7,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::canvas::Pos;
+use crate::emoji;
 use crate::theme;
 
 const PLACEHOLDER_USERS: &[&str] = &[
@@ -101,7 +102,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             " dartboard \u{00b7} lifted \u{00b7} Esc to cancel ".to_string()
         }
     } else {
-        format!(" dartboard \u{00b7} {} for help ", "^P")
+        format!(
+            " dartboard \u{00b7} {} for help \u{00b7} {} glyphs ",
+            "^P", "^]"
+        )
     };
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -120,6 +124,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Cursor position
     let cursor_visible = !app.show_help
+        && !app.emoji_picker_open
         && app.cursor.x >= app.viewport_origin.x
         && app.cursor.y >= app.viewport_origin.y
         && app.cursor.x < app.viewport_origin.x + canvas_area.width as usize
@@ -132,6 +137,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.show_help {
         render_help(frame, area);
+    }
+
+    if app.emoji_picker_open {
+        if let Some(catalog) = app.icon_catalog.as_ref() {
+            emoji::picker::render(frame, area, &app.emoji_picker_state, catalog);
+        }
     }
 }
 
@@ -382,7 +393,13 @@ fn render_help(frame: &mut Frame, area: Rect) {
                 key,
                 desc,
             ),
-            help_entry_line("^X", "cut (x2=lift)", bottom_right_width as usize, key, desc),
+            help_entry_line(
+                "^X",
+                "cut (x2=lift)",
+                bottom_right_width as usize,
+                key,
+                desc,
+            ),
             help_entry_line_with_key_width(
                 "^Z ^R",
                 "undo / redo",
@@ -400,7 +417,13 @@ fn render_help(frame: &mut Frame, area: Rect) {
                 key,
                 desc,
             ),
-            help_entry_line("^C", "copy (x2=lift)", bottom_right_width as usize, key, desc),
+            help_entry_line(
+                "^C",
+                "copy (x2=lift)",
+                bottom_right_width as usize,
+                key,
+                desc,
+            ),
             help_entry_line_with_key_width(
                 "^P",
                 "help toggle",
@@ -418,7 +441,13 @@ fn render_help(frame: &mut Frame, area: Rect) {
                 key,
                 desc,
             ),
-            help_entry_line("^V", "paste / stamp", bottom_right_width as usize, key, desc),
+            help_entry_line(
+                "^V",
+                "paste / stamp",
+                bottom_right_width as usize,
+                key,
+                desc,
+            ),
             help_entry_line_with_key_width(
                 "^Q",
                 "quit",
