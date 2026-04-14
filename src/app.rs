@@ -6,7 +6,7 @@ use crossterm::event::{
 use crossterm::{clipboard::CopyToClipboard, execute};
 use ratatui::layout::Rect;
 
-use crate::canvas::{Canvas, Pos};
+use crate::canvas::{Canvas, CellValue, Pos};
 use crate::emoji;
 
 const UNDO_DEPTH_CAP: usize = 500;
@@ -58,17 +58,34 @@ impl Bounds {
     fn height(self) -> usize {
         self.max_y - self.min_y + 1
     }
+
+    fn normalized_for_canvas(self, canvas: &Canvas) -> Self {
+        let mut bounds = self;
+        for y in self.min_y..=self.max_y {
+            if bounds.min_x > 0 && canvas.is_continuation(Pos { x: bounds.min_x, y }) {
+                bounds.min_x -= 1;
+            }
+            if matches!(
+                canvas.cell(Pos { x: bounds.max_x, y }),
+                Some(CellValue::Wide(_))
+            ) && bounds.max_x + 1 < canvas.width
+            {
+                bounds.max_x += 1;
+            }
+        }
+        bounds
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Clipboard {
     pub width: usize,
     pub height: usize,
-    cells: Vec<char>,
+    cells: Vec<Option<CellValue>>,
 }
 
 impl Clipboard {
-    pub fn get(&self, x: usize, y: usize) -> char {
+    pub fn get(&self, x: usize, y: usize) -> Option<CellValue> {
         self.cells[y * self.width + x]
     }
 }
@@ -104,6 +121,8 @@ pub struct App {
     pub icon_catalog: Option<emoji::catalog::IconCatalogData>,
     last_clip_bounds: Option<Bounds>,
     paint_canvas_before: Option<Canvas>,
+    paint_stroke_anchor: Option<Pos>,
+    paint_stroke_last: Option<Pos>,
     undo_stack: Vec<Canvas>,
     redo_stack: Vec<Canvas>,
 }
@@ -128,6 +147,8 @@ impl App {
             icon_catalog: None,
             last_clip_bounds: None,
             paint_canvas_before: None,
+            paint_stroke_anchor: None,
+            paint_stroke_last: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -364,12 +385,25 @@ impl App {
     fn system_clipboard_bounds(&self) -> Bounds {
         self.selection_bounds()
             .unwrap_or_else(|| self.full_canvas_bounds())
+            .normalized_for_canvas(&self.canvas)
     }
 
     fn fill_bounds_on(canvas: &mut Canvas, bounds: Bounds, ch: char) {
         for y in bounds.min_y..=bounds.max_y {
-            for x in bounds.min_x..=bounds.max_x {
-                canvas.set(Pos { x, y }, ch);
+            let mut x = bounds.min_x;
+            while x <= bounds.max_x {
+                if ch == ' ' {
+                    canvas.clear(Pos { x, y });
+                    x += 1;
+                    continue;
+                }
+
+                let width = Canvas::display_width(ch);
+                if width == 2 && x == bounds.max_x {
+                    break;
+                }
+                let _ = canvas.put_glyph(Pos { x, y }, ch);
+                x += width;
             }
         }
     }
@@ -378,7 +412,7 @@ impl App {
         let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
         for y in bounds.min_y..=bounds.max_y {
             for x in bounds.min_x..=bounds.max_x {
-                cells.push(self.canvas.get(Pos { x, y }));
+                cells.push(self.canvas.cell(Pos { x, y }));
             }
         }
         Clipboard {
@@ -393,7 +427,9 @@ impl App {
             self.toggle_float_transparency();
             return;
         }
-        let bounds = self.selection_or_cursor_bounds();
+        let bounds = self
+            .selection_or_cursor_bounds()
+            .normalized_for_canvas(&self.canvas);
         if self.clipboard.is_some() && self.last_clip_bounds == Some(bounds) {
             self.enter_floating(bounds, false);
             return;
@@ -406,7 +442,11 @@ impl App {
         let mut text = String::with_capacity(bounds.width() * bounds.height() + bounds.height());
         for y in bounds.min_y..=bounds.max_y {
             for x in bounds.min_x..=bounds.max_x {
-                text.push(self.canvas.get(Pos { x, y }));
+                match self.canvas.cell(Pos { x, y }) {
+                    Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => text.push(ch),
+                    Some(CellValue::WideCont) => {}
+                    None => text.push(' '),
+                }
             }
             if y != bounds.max_y {
                 text.push('\n');
@@ -429,7 +469,9 @@ impl App {
             self.toggle_float_transparency();
             return;
         }
-        let bounds = self.selection_or_cursor_bounds();
+        let bounds = self
+            .selection_or_cursor_bounds()
+            .normalized_for_canvas(&self.canvas);
         if self.clipboard.is_some() && self.last_clip_bounds == Some(bounds) {
             self.enter_floating(bounds, false);
             return;
@@ -470,22 +512,23 @@ impl App {
         self.apply_canvas_edit(|canvas| {
             for y in 0..clipboard.height {
                 for x in 0..clipboard.width {
-                    let ch = clipboard.get(x, y);
-                    if transparent && ch == ' ' {
-                        continue;
-                    }
                     let target_x = pos.x + x;
                     let target_y = pos.y + y;
                     if target_x >= canvas.width || target_y >= canvas.height {
                         continue;
                     }
-                    canvas.set(
-                        Pos {
-                            x: target_x,
-                            y: target_y,
-                        },
-                        ch,
-                    );
+                    let target = Pos {
+                        x: target_x,
+                        y: target_y,
+                    };
+                    match clipboard.get(x, y) {
+                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
+                            let _ = canvas.put_glyph(target, ch);
+                        }
+                        Some(CellValue::WideCont) => {}
+                        None if !transparent => canvas.clear(target),
+                        None => {}
+                    }
                 }
             }
         });
@@ -499,17 +542,20 @@ impl App {
         {
             let pos = self.cursor;
             let cb = &floating.clipboard;
-            let transparent = floating.transparent;
             for y in 0..cb.height {
                 for x in 0..cb.width {
-                    let ch = cb.get(x, y);
-                    if transparent && ch == ' ' {
-                        continue;
-                    }
                     let tx = pos.x + x;
                     let ty = pos.y + y;
                     if tx < self.canvas.width && ty < self.canvas.height {
-                        self.canvas.set(Pos { x: tx, y: ty }, ch);
+                        let target = Pos { x: tx, y: ty };
+                        match cb.get(x, y) {
+                            Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
+                                let _ = self.canvas.put_glyph(target, ch);
+                            }
+                            Some(CellValue::WideCont) => {}
+                            None if !floating.transparent => self.canvas.clear(target),
+                            None => {}
+                        }
                     }
                 }
             }
@@ -519,6 +565,8 @@ impl App {
 
     fn begin_paint_stroke(&mut self) {
         self.paint_canvas_before = Some(self.canvas.clone());
+        self.paint_stroke_anchor = Some(self.cursor);
+        self.paint_stroke_last = None;
     }
 
     fn end_paint_stroke(&mut self) {
@@ -531,11 +579,147 @@ impl App {
                 self.redo_stack.clear();
             }
         }
+        self.paint_stroke_anchor = None;
+        self.paint_stroke_last = None;
     }
 
     fn dismiss_floating(&mut self) {
         self.end_paint_stroke();
         self.floating = None;
+    }
+
+    fn floating_brush_width(&self) -> usize {
+        self.floating
+            .as_ref()
+            .map(|floating| floating.clipboard.width.max(1))
+            .unwrap_or(1)
+    }
+
+    fn snap_horizontal_brush_x(anchor_x: usize, raw_x: usize, brush_width: usize) -> usize {
+        if brush_width <= 1 {
+            return raw_x;
+        }
+
+        if raw_x >= anchor_x {
+            anchor_x + ((raw_x - anchor_x) / brush_width) * brush_width
+        } else {
+            anchor_x - ((anchor_x - raw_x) / brush_width) * brush_width
+        }
+    }
+
+    fn paint_floating_at_cursor(&mut self) {
+        self.stamp_onto_canvas();
+        self.paint_stroke_last = Some(self.cursor);
+    }
+
+    fn line_points(start: Pos, end: Pos) -> Vec<Pos> {
+        let mut points = Vec::new();
+        let mut x = start.x as isize;
+        let mut y = start.y as isize;
+        let target_x = end.x as isize;
+        let target_y = end.y as isize;
+        let dx = (target_x - x).abs();
+        let sx = if x < target_x { 1 } else { -1 };
+        let dy = -(target_y - y).abs();
+        let sy = if y < target_y { 1 } else { -1 };
+        let mut err = dx + dy;
+
+        loop {
+            points.push(Pos {
+                x: x as usize,
+                y: y as usize,
+            });
+
+            if x == target_x && y == target_y {
+                break;
+            }
+
+            let twice_err = 2 * err;
+            if twice_err >= dy {
+                err += dy;
+                x += sx;
+            }
+            if twice_err <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+
+        points
+    }
+
+    fn paint_floating_diagonal_segment(&mut self, start: Pos, end: Pos, brush_width: usize) {
+        let mut last_stamped = start;
+        for point in Self::line_points(start, end).into_iter().skip(1) {
+            let should_stamp =
+                point.y != last_stamped.y || point.x.abs_diff(last_stamped.x) >= brush_width;
+            if !should_stamp {
+                continue;
+            }
+
+            self.cursor = point;
+            self.paint_floating_at_cursor();
+            last_stamped = point;
+        }
+
+        let should_stamp_end =
+            end.y != last_stamped.y || end.x.abs_diff(last_stamped.x) >= brush_width;
+        if should_stamp_end {
+            self.cursor = end;
+            self.paint_floating_at_cursor();
+        }
+    }
+
+    fn paint_floating_drag(&mut self, raw_pos: Pos) {
+        let Some(last) = self.paint_stroke_last else {
+            self.cursor = raw_pos;
+            self.paint_floating_at_cursor();
+            return;
+        };
+
+        let anchor = self.paint_stroke_anchor.unwrap_or(last);
+        let brush_width = self.floating_brush_width();
+        let is_pure_horizontal =
+            brush_width > 1 && raw_pos.y == last.y && raw_pos.y == anchor.y && last.y == anchor.y;
+
+        if is_pure_horizontal {
+            let anchor_x = anchor.x;
+            let snapped_x = Self::snap_horizontal_brush_x(anchor_x, raw_pos.x, brush_width);
+            let target = Pos {
+                x: snapped_x,
+                y: raw_pos.y,
+            };
+
+            if target == last {
+                return;
+            }
+
+            self.cursor = target;
+            self.paint_floating_at_cursor();
+            return;
+        }
+
+        if brush_width > 1 && raw_pos.y == last.y {
+            if raw_pos.x.abs_diff(last.x) < brush_width {
+                return;
+            }
+
+            self.cursor = raw_pos;
+            self.paint_floating_at_cursor();
+            return;
+        }
+
+        if brush_width > 1 && raw_pos.y != last.y {
+            self.paint_floating_diagonal_segment(last, raw_pos, brush_width);
+            return;
+        }
+
+        if raw_pos == last {
+            return;
+        }
+
+        self.cursor = raw_pos;
+        self.paint_floating_at_cursor();
     }
 
     fn paste_clipboard(&mut self) {
@@ -552,13 +736,17 @@ impl App {
                     if target_x >= canvas.width || target_y >= canvas.height {
                         continue;
                     }
-                    canvas.set(
-                        Pos {
-                            x: target_x,
-                            y: target_y,
-                        },
-                        clipboard.get(x, y),
-                    );
+                    let target = Pos {
+                        x: target_x,
+                        y: target_y,
+                    };
+                    match clipboard.get(x, y) {
+                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
+                            let _ = canvas.put_glyph(target, ch);
+                        }
+                        Some(CellValue::WideCont) => {}
+                        None => canvas.clear(target),
+                    }
                 }
             }
         });
@@ -677,14 +865,21 @@ impl App {
     }
 
     fn fill_selection_or_cell(&mut self, ch: char) {
-        let bounds = self.selection_or_cursor_bounds();
+        let bounds = self
+            .selection_or_cursor_bounds()
+            .normalized_for_canvas(&self.canvas);
         self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ch));
     }
 
     fn insert_char(&mut self, ch: char) {
         let cursor = self.cursor;
-        self.apply_canvas_edit(|canvas| canvas.set(cursor, ch));
-        self.move_right();
+        let width = Canvas::display_width(ch);
+        self.apply_canvas_edit(|canvas| {
+            let _ = canvas.put_glyph(cursor, ch);
+        });
+        for _ in 0..width {
+            self.move_right();
+        }
     }
 
     fn open_emoji_picker(&mut self) {
@@ -929,9 +1124,9 @@ impl App {
                     }
                     _ => {
                         if x < canvas.width && y < canvas.height {
-                            canvas.set(Pos { x, y }, ch);
+                            let _ = canvas.put_glyph(Pos { x, y }, ch);
                         }
-                        x += 1;
+                        x += Canvas::display_width(ch);
                     }
                 }
             }
@@ -940,59 +1135,98 @@ impl App {
 
     fn backspace(&mut self) {
         self.move_left();
+        let origin = self.canvas.glyph_origin(self.cursor);
         let cursor = self.cursor;
         self.apply_canvas_edit(|canvas| canvas.clear(cursor));
+        if let Some(origin) = origin {
+            self.cursor = origin;
+        }
     }
 
     fn delete_at_cursor(&mut self) {
+        if let Some(origin) = self.canvas.glyph_origin(self.cursor) {
+            self.cursor = origin;
+        }
         let cursor = self.cursor;
         self.apply_canvas_edit(|canvas| canvas.clear(cursor));
     }
 
     fn push_left(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.push_left(y, x));
     }
 
     fn push_down(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.push_down(x, y));
     }
 
     fn push_up(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.push_up(x, y));
     }
 
     fn push_right(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.push_right(y, x));
     }
 
     fn pull_from_left(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.pull_from_left(y, x));
     }
 
     fn pull_from_down(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.pull_from_down(x, y));
     }
 
     fn pull_from_up(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.pull_from_up(x, y));
     }
 
     fn pull_from_right(&mut self) {
-        let x = self.cursor.x;
+        let x = self
+            .canvas
+            .glyph_origin(self.cursor)
+            .map(|pos| pos.x)
+            .unwrap_or(self.cursor.x);
         let y = self.cursor.y;
         self.apply_canvas_edit(|canvas| canvas.pull_from_right(y, x));
     }
@@ -1114,13 +1348,12 @@ impl App {
                             if let Some(pos) = canvas_pos {
                                 self.cursor = pos;
                                 self.begin_paint_stroke();
-                                self.stamp_onto_canvas();
+                                self.paint_floating_at_cursor();
                             }
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
                             if let Some(pos) = canvas_pos {
-                                self.cursor = pos;
-                                self.stamp_onto_canvas();
+                                self.paint_floating_drag(pos);
                             }
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
@@ -1325,11 +1558,32 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{App, Mode};
-    use crate::canvas::Pos;
+    use crate::canvas::{CellValue, Pos};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use ratatui::layout::Rect;
+
+    fn setup_floating_wide_brush() -> App {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 64, 24));
+        app.canvas.set(Pos { x: 0, y: 0 }, '🌱');
+        app.selection_anchor = Some(Pos { x: 0, y: 0 });
+        app.cursor = Pos { x: 0, y: 0 };
+        app.mode = Mode::Select;
+        app.copy_selection_or_cell();
+        app.copy_selection_or_cell();
+        app
+    }
+
+    fn wide_origins_in_row(app: &App, y: usize, x_max: usize) -> Vec<usize> {
+        (0..=x_max)
+            .filter_map(|x| match app.canvas.cell(Pos { x, y }) {
+                Some(CellValue::Wide(_)) => Some(x),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn smart_fill_matches_selection_shape() {
@@ -1590,8 +1844,32 @@ mod tests {
 
         assert!(app.emoji_picker_open);
         assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), expected);
-        assert_eq!(app.canvas.get(Pos { x: 1, y: 0 }), expected);
+        assert_eq!(app.canvas.get(Pos { x: 1, y: 0 }), ' ');
+        assert_eq!(app.canvas.get(Pos { x: 2, y: 0 }), expected);
+        assert_eq!(app.cursor, Pos { x: 4, y: 0 });
+    }
+
+    #[test]
+    fn wide_glyph_insert_advances_two_cells() {
+        let mut app = App::new();
+
+        app.insert_char('🌱');
+
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), '🌱');
+        assert!(app.canvas.is_continuation(Pos { x: 1, y: 0 }));
         assert_eq!(app.cursor, Pos { x: 2, y: 0 });
+    }
+
+    #[test]
+    fn backspace_on_wide_glyph_clears_both_cells() {
+        let mut app = App::new();
+        app.insert_char('🌱');
+
+        app.backspace();
+
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), ' ');
+        assert_eq!(app.canvas.get(Pos { x: 1, y: 0 }), ' ');
+        assert_eq!(app.cursor, Pos { x: 0, y: 0 });
     }
 
     #[test]
@@ -1923,6 +2201,286 @@ mod tests {
         app.undo();
         assert_eq!(app.canvas.get(Pos { x: 3, y: 3 }), 'Q');
         assert_eq!(app.canvas.get(Pos { x: 6, y: 6 }), ' ');
+    }
+
+    #[test]
+    fn horizontal_drag_with_wide_brush_skips_overlapping_cells() {
+        let mut app = setup_floating_wide_brush();
+
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 4,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(
+            app.canvas.cell(Pos { x: 3, y: 2 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 4, y: 2 }),
+            Some(CellValue::WideCont)
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 5, y: 2 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 6, y: 2 }),
+            Some(CellValue::WideCont)
+        );
+    }
+
+    #[test]
+    fn diagonal_drag_with_wide_brush_does_not_emit_horizontal_rays() {
+        let mut app = setup_floating_wide_brush();
+
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 16,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 8,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 8,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(
+            app.canvas.cell(Pos { x: 12, y: 6 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 13, y: 6 }),
+            Some(CellValue::WideCont)
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 16, y: 7 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 17, y: 7 }),
+            Some(CellValue::WideCont)
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 8, y: 7 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 9, y: 7 }),
+            Some(CellValue::WideCont)
+        );
+        assert_eq!(app.canvas.get(Pos { x: 10, y: 7 }), ' ');
+        assert_eq!(app.canvas.get(Pos { x: 12, y: 7 }), ' ');
+    }
+
+    #[test]
+    fn wide_brush_same_row_jump_does_not_fill_intermediate_cells() {
+        let mut app = setup_floating_wide_brush();
+
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 4,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 4,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(
+            app.canvas.cell(Pos { x: 12, y: 6 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 13, y: 6 }),
+            Some(CellValue::WideCont)
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 4, y: 6 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 5, y: 6 }),
+            Some(CellValue::WideCont)
+        );
+        assert_eq!(app.canvas.get(Pos { x: 6, y: 6 }), ' ');
+        assert_eq!(app.canvas.get(Pos { x: 10, y: 6 }), ' ');
+    }
+
+    #[test]
+    fn shallow_diagonal_drag_with_wide_brush_fills_more_evenly() {
+        let mut app = setup_floating_wide_brush();
+
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 9,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 9,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(
+            app.canvas.cell(Pos { x: 3, y: 2 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 5, y: 2 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 6, y: 3 }),
+            Some(CellValue::Wide('🌱'))
+        );
+        assert_eq!(
+            app.canvas.cell(Pos { x: 8, y: 3 }),
+            Some(CellValue::Wide('🌱'))
+        );
+    }
+
+    #[test]
+    fn shallow_wide_brush_diagonal_sweep_keeps_row_gaps_within_brush_width() {
+        for start_x in [2_u16, 3_u16] {
+            for end_x in (start_x + 3)..=24 {
+                let mut app = setup_floating_wide_brush();
+
+                app.handle_event(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: start_x,
+                    row: 2,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                app.handle_event(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column: end_x,
+                    row: 3,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                app.handle_event(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: end_x,
+                    row: 3,
+                    modifiers: KeyModifiers::NONE,
+                }));
+
+                let row_two = wide_origins_in_row(&app, 2, end_x as usize + 2);
+                let row_three = wide_origins_in_row(&app, 3, end_x as usize + 2);
+
+                assert!(
+                    !row_two.is_empty(),
+                    "row 2 empty for start_x={start_x}, end_x={end_x}"
+                );
+                assert!(
+                    !row_three.is_empty(),
+                    "row 3 empty for start_x={start_x}, end_x={end_x}"
+                );
+                assert!(
+                    row_two.windows(2).all(|pair| pair[1] - pair[0] <= 2),
+                    "row 2 gap too large for start_x={start_x}, end_x={end_x}: {row_two:?}"
+                );
+                assert!(
+                    row_three.windows(2).all(|pair| pair[1] - pair[0] <= 2),
+                    "row 3 gap too large for start_x={start_x}, end_x={end_x}: {row_three:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shallow_diagonal_with_same_row_micro_steps_keeps_visible_progress() {
+        for start_x in [3_u16, 4_u16] {
+            let mut app = setup_floating_wide_brush();
+
+            app.handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: start_x,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }));
+            app.handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: start_x + 4,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            }));
+            for column in (start_x + 5)..=(start_x + 11) {
+                app.handle_event(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column,
+                    row: 3,
+                    modifiers: KeyModifiers::NONE,
+                }));
+            }
+            app.handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: start_x + 11,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            }));
+
+            let row_three = wide_origins_in_row(&app, 3, (start_x + 13) as usize);
+            assert!(
+                row_three.len() >= 4,
+                "expected multiple visible stamps on shallow row for start_x={start_x}: {row_three:?}"
+            );
+            assert!(
+                row_three.windows(2).all(|pair| pair[1] - pair[0] <= 2),
+                "row 3 gap too large for start_x={start_x}: {row_three:?}"
+            );
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::canvas::Pos;
+use crate::canvas::{CellValue, Pos};
 use crate::emoji;
 use crate::theme;
 
@@ -44,14 +44,15 @@ impl<'a> Widget for CanvasWidget<'a> {
                 }
 
                 let pos = Pos { x, y };
-                let c = self.app.canvas.get(pos);
+                let cell_value = self.app.canvas.cell(pos);
 
                 if has_selection && self.app.is_selected(pos) {
-                    cell.set_char(c)
-                        .set_bg(theme::SELECTION_BG)
-                        .set_fg(theme::HIGHLIGHT);
-                } else if c != ' ' {
-                    cell.set_char(c).set_fg(theme::TEXT);
+                    cell.set_bg(theme::SELECTION_BG).set_fg(theme::HIGHLIGHT);
+                    if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
+                        cell.set_char(ch);
+                    }
+                } else if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
+                    cell.set_char(ch).set_fg(theme::TEXT);
                 }
             }
         }
@@ -77,14 +78,20 @@ impl<'a> Widget for CanvasWidget<'a> {
                         continue;
                     }
 
-                    let fc = cb.get(cx, cy);
-                    if floating.transparent && fc == ' ' {
-                        continue;
-                    }
                     let cell = &mut buf[(area.x + dx, area.y + dy)];
-                    cell.set_char(fc).set_bg(theme::FLOAT_BG);
-                    if fc != ' ' {
-                        cell.set_fg(theme::TEXT);
+                    match cb.get(cx, cy) {
+                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
+                            cell.set_char(ch)
+                                .set_bg(theme::FLOAT_BG)
+                                .set_fg(theme::TEXT);
+                        }
+                        Some(CellValue::WideCont) => {
+                            cell.set_bg(theme::FLOAT_BG);
+                        }
+                        None if !floating.transparent => {
+                            cell.set_char(' ').set_bg(theme::FLOAT_BG);
+                        }
+                        None => {}
                     }
                 }
             }

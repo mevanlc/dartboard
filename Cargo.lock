@@ -235,6 +235,7 @@ dependencies = [
  "emojis",
  "ratatui",
  "serde_json",
+ "unicode-width",
  "unicode_names2",
 ]
 
