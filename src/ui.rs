@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, Clipboard, SWATCH_CAPACITY};
 use crate::canvas::{CellValue, Pos};
 use crate::emoji;
 use crate::theme;
@@ -19,6 +19,11 @@ const PLACEHOLDER_USERS: &[&str] = &[
 ];
 const USER_LIST_MIN_WIDTH: u16 = 12;
 const USER_LIST_MAX_WIDTH: u16 = 24;
+
+const SWATCH_BOX_WIDTH: u16 = 15;
+const SWATCH_BOX_HEIGHT: u16 = 6;
+const SWATCH_GAP: u16 = 1;
+const SWATCH_STRIP_RESERVED_ROWS: u16 = SWATCH_BOX_HEIGHT - 1;
 
 struct CanvasWidget<'a> {
     app: &'a App,
@@ -100,7 +105,18 @@ impl<'a> Widget for CanvasWidget<'a> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
+    let full = frame.area();
+    let strip_rows = if full.height > SWATCH_STRIP_RESERVED_ROWS + 3 {
+        SWATCH_STRIP_RESERVED_ROWS
+    } else {
+        0
+    };
+    let area = Rect::new(
+        full.x,
+        full.y + strip_rows,
+        full.width,
+        full.height.saturating_sub(strip_rows),
+    );
 
     let title = if let Some(ref floating) = app.floating {
         if floating.transparent {
@@ -128,6 +144,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(CanvasWidget { app }, canvas_area);
     render_user_list(frame, canvas_area);
+    if strip_rows > 0 {
+        render_swatch_strip(frame.buffer_mut(), full, area, app);
+    } else {
+        app.swatch_hit_boxes = [None; SWATCH_CAPACITY];
+    }
 
     // Cursor position
     let cursor_visible = !app.show_help
@@ -150,6 +171,203 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some(catalog) = app.icon_catalog.as_ref() {
             emoji::picker::render(frame, area, &app.emoji_picker_state, catalog);
         }
+    }
+}
+
+fn render_swatch_strip(buf: &mut Buffer, full: Rect, artboard: Rect, app: &mut App) {
+    app.swatch_hit_boxes = [None; SWATCH_CAPACITY];
+
+    let strip_total_width =
+        SWATCH_BOX_WIDTH * SWATCH_CAPACITY as u16 + SWATCH_GAP * (SWATCH_CAPACITY as u16 - 1);
+
+    if artboard.width < 4 || full.width < SWATCH_BOX_WIDTH + 2 {
+        return;
+    }
+
+    let right_inset: u16 = 1;
+    let right_edge = artboard.x + artboard.width - right_inset;
+    let desired_left = right_edge.saturating_sub(strip_total_width);
+    let min_left = full.x + 1;
+    let strip_left = desired_left.max(min_left);
+    let strip_right = right_edge.min(full.x + full.width);
+    let available = strip_right.saturating_sub(strip_left);
+
+    let artboard_top_row = artboard.y;
+    let active_idx = app
+        .floating
+        .as_ref()
+        .and_then(|floating| floating.source_index);
+
+    for idx in 0..SWATCH_CAPACITY {
+        let offset_from_right =
+            (SWATCH_CAPACITY as u16 - 1 - idx as u16) * (SWATCH_BOX_WIDTH + SWATCH_GAP);
+        if offset_from_right + SWATCH_BOX_WIDTH > available {
+            continue;
+        }
+        let box_x = strip_right - offset_from_right - SWATCH_BOX_WIDTH;
+        let box_y = full.y;
+        let rect = Rect::new(box_x, box_y, SWATCH_BOX_WIDTH, SWATCH_BOX_HEIGHT);
+
+        let swatch = app.swatches.get(idx);
+        let is_active = active_idx == Some(idx);
+        let is_transparent = is_active
+            && app
+                .floating
+                .as_ref()
+                .map(|floating| floating.transparent)
+                .unwrap_or(false);
+
+        render_swatch_box(buf, rect, artboard_top_row, swatch, is_active, is_transparent);
+        app.swatch_hit_boxes[idx] = Some(rect);
+    }
+}
+
+fn render_swatch_box(
+    buf: &mut Buffer,
+    rect: Rect,
+    artboard_top_row: u16,
+    swatch: Option<&Clipboard>,
+    is_active: bool,
+    is_transparent: bool,
+) {
+    let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
+    for dy in 0..inner.height {
+        for dx in 0..inner.width {
+            buf[(inner.x + dx, inner.y + dy)]
+                .set_char(' ')
+                .set_bg(theme::OOB_BG)
+                .set_fg(theme::TEXT);
+        }
+    }
+
+    let border_style = if is_active {
+        Style::default().fg(theme::HIGHLIGHT)
+    } else if swatch.is_some() {
+        Style::default().fg(theme::ACCENT)
+    } else {
+        Style::default().fg(theme::MUTED_GREATER)
+    };
+
+    let top_row = rect.y;
+    let bottom_row = rect.y + rect.height - 1;
+    let left_col = rect.x;
+    let right_col = rect.x + rect.width - 1;
+
+    buf[(left_col, top_row)]
+        .set_char('┌')
+        .set_style(border_style);
+    buf[(right_col, top_row)]
+        .set_char('┐')
+        .set_style(border_style);
+    for x in (left_col + 1)..right_col {
+        buf[(x, top_row)].set_char('─').set_style(border_style);
+    }
+    for y in (top_row + 1)..bottom_row {
+        buf[(left_col, y)].set_char('│').set_style(border_style);
+        buf[(right_col, y)].set_char('│').set_style(border_style);
+    }
+
+    if bottom_row == artboard_top_row {
+        buf[(left_col, bottom_row)]
+            .set_char('┴')
+            .set_style(border_style);
+        buf[(right_col, bottom_row)]
+            .set_char('┴')
+            .set_style(border_style);
+    } else {
+        buf[(left_col, bottom_row)]
+            .set_char('└')
+            .set_style(border_style);
+        buf[(right_col, bottom_row)]
+            .set_char('┘')
+            .set_style(border_style);
+        for x in (left_col + 1)..right_col {
+            buf[(x, bottom_row)].set_char('─').set_style(border_style);
+        }
+    }
+
+    if is_transparent {
+        let marker_x = right_col - 1;
+        buf[(marker_x, top_row)]
+            .set_char('◌')
+            .set_style(Style::default().fg(theme::HIGHLIGHT));
+    }
+
+    let Some(clipboard) = swatch else {
+        return;
+    };
+
+    let (crop_x, crop_y) = clipboard_preview_offset(clipboard);
+    let preview_style = Style::default().fg(theme::TEXT).bg(theme::OOB_BG);
+
+    for dy in 0..inner.height {
+        let cy = crop_y + dy as usize;
+        if cy >= clipboard.height {
+            break;
+        }
+
+        let mut dx: u16 = 0;
+        while dx < inner.width {
+            let cx = crop_x + dx as usize;
+            if cx >= clipboard.width {
+                break;
+            }
+
+            match clipboard.get(cx, cy) {
+                Some(CellValue::Narrow(ch)) => {
+                    buf[(inner.x + dx, inner.y + dy)]
+                        .set_char(ch)
+                        .set_style(preview_style);
+                    dx += 1;
+                }
+                Some(CellValue::Wide(ch)) => {
+                    buf[(inner.x + dx, inner.y + dy)]
+                        .set_char(ch)
+                        .set_style(preview_style);
+                    if dx + 1 < inner.width {
+                        buf[(inner.x + dx + 1, inner.y + dy)]
+                            .set_char(' ')
+                            .set_style(preview_style);
+                    }
+                    dx += 2;
+                }
+                Some(CellValue::WideCont) | None => {
+                    dx += 1;
+                }
+            }
+        }
+    }
+}
+
+fn clipboard_preview_offset(clipboard: &Clipboard) -> (usize, usize) {
+    let mut first_row = 0;
+    'outer_row: for y in 0..clipboard.height {
+        for x in 0..clipboard.width {
+            if cell_is_visible(clipboard.get(x, y)) {
+                first_row = y;
+                break 'outer_row;
+            }
+        }
+    }
+
+    let mut first_col = 0;
+    'outer_col: for x in 0..clipboard.width {
+        for y in 0..clipboard.height {
+            if cell_is_visible(clipboard.get(x, y)) {
+                first_col = x;
+                break 'outer_col;
+            }
+        }
+    }
+
+    (first_col, first_row)
+}
+
+fn cell_is_visible(cell: Option<CellValue>) -> bool {
+    match cell {
+        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => ch != ' ',
+        Some(CellValue::WideCont) => true,
+        None => false,
     }
 }
 
@@ -377,7 +595,13 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ),
         two_col_line(
             help_entry_line("Enter", "move down", top_width as usize, key, desc),
-            help_entry_line("^T", "flip active corner", right_width as usize, key, desc),
+            help_entry_line(
+                "^T",
+                "flip corner / see-thru",
+                right_width as usize,
+                key,
+                desc,
+            ),
         ),
         two_col_line(
             blank_line(top_width as usize),
@@ -402,7 +626,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             ),
             help_entry_line(
                 "^X",
-                "cut (x2=lift)",
+                "cut → swatch",
                 bottom_right_width as usize,
                 key,
                 desc,
@@ -426,7 +650,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             ),
             help_entry_line(
                 "^C",
-                "copy (x2=lift)",
+                "copy → swatch",
                 bottom_right_width as usize,
                 key,
                 desc,

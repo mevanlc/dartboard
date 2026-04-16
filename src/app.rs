@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 
 use crossterm::event::{
@@ -10,6 +11,7 @@ use crate::canvas::{Canvas, CellValue, Pos};
 use crate::emoji;
 
 const UNDO_DEPTH_CAP: usize = 500;
+pub const SWATCH_CAPACITY: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -94,6 +96,7 @@ impl Clipboard {
 pub struct FloatingSelection {
     pub clipboard: Clipboard,
     pub transparent: bool,
+    pub source_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,11 +118,11 @@ pub struct App {
     pub selection_anchor: Option<Pos>,
     drag_origin: Option<Pos>,
     pan_drag: Option<PanDrag>,
-    clipboard: Option<Clipboard>,
+    pub swatches: VecDeque<Clipboard>,
     pub floating: Option<FloatingSelection>,
     pub emoji_picker_state: emoji::EmojiPickerState,
     pub icon_catalog: Option<emoji::catalog::IconCatalogData>,
-    last_clip_bounds: Option<Bounds>,
+    pub swatch_hit_boxes: [Option<Rect>; SWATCH_CAPACITY],
     paint_canvas_before: Option<Canvas>,
     paint_stroke_anchor: Option<Pos>,
     paint_stroke_last: Option<Pos>,
@@ -141,11 +144,11 @@ impl App {
             selection_anchor: None,
             drag_origin: None,
             pan_drag: None,
-            clipboard: None,
+            swatches: VecDeque::new(),
             floating: None,
             emoji_picker_state: emoji::EmojiPickerState::default(),
             icon_catalog: None,
-            last_clip_bounds: None,
+            swatch_hit_boxes: [None; SWATCH_CAPACITY],
             paint_canvas_before: None,
             paint_stroke_anchor: None,
             paint_stroke_last: None,
@@ -270,6 +273,20 @@ impl App {
             let cy = self.viewport_origin.y + row - vy;
             if cx < self.canvas.width && cy < self.canvas.height {
                 return Some(Pos { x: cx, y: cy });
+            }
+        }
+        None
+    }
+
+    fn swatch_hit(&self, col: u16, row: u16) -> Option<usize> {
+        for (idx, maybe_rect) in self.swatch_hit_boxes.iter().enumerate() {
+            let Some(rect) = maybe_rect else { continue };
+            if col >= rect.x
+                && row >= rect.y
+                && col < rect.x + rect.width
+                && row < rect.y + rect.height
+            {
+                return Some(idx);
             }
         }
         None
@@ -424,18 +441,12 @@ impl App {
 
     fn copy_selection_or_cell(&mut self) {
         if self.floating.is_some() {
-            self.toggle_float_transparency();
             return;
         }
         let bounds = self
             .selection_or_cursor_bounds()
             .normalized_for_canvas(&self.canvas);
-        if self.clipboard.is_some() && self.last_clip_bounds == Some(bounds) {
-            self.enter_floating(bounds, false);
-            return;
-        }
-        self.clipboard = Some(self.capture_bounds(bounds));
-        self.last_clip_bounds = Some(bounds);
+        self.push_swatch(self.capture_bounds(bounds));
     }
 
     fn export_bounds_as_text(&self, bounds: Bounds) -> String {
@@ -466,33 +477,40 @@ impl App {
 
     fn cut_selection_or_cell(&mut self) {
         if self.floating.is_some() {
-            self.toggle_float_transparency();
             return;
         }
         let bounds = self
             .selection_or_cursor_bounds()
             .normalized_for_canvas(&self.canvas);
-        if self.clipboard.is_some() && self.last_clip_bounds == Some(bounds) {
-            self.enter_floating(bounds, false);
-            return;
-        }
-        self.clipboard = Some(self.capture_bounds(bounds));
-        self.last_clip_bounds = Some(bounds);
+        self.push_swatch(self.capture_bounds(bounds));
         self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ' '));
     }
 
-    fn enter_floating(&mut self, bounds: Bounds, transparent: bool) {
-        if let Some(ref clipboard) = self.clipboard {
-            self.floating = Some(FloatingSelection {
-                clipboard: clipboard.clone(),
-                transparent,
-            });
-            self.cursor = Pos {
-                x: bounds.min_x,
-                y: bounds.min_y,
-            };
-            self.clear_selection();
-            self.last_clip_bounds = None;
+    fn push_swatch(&mut self, clipboard: Clipboard) {
+        self.swatches.push_front(clipboard);
+        while self.swatches.len() > SWATCH_CAPACITY {
+            self.swatches.pop_back();
+        }
+    }
+
+    pub fn activate_swatch(&mut self, idx: usize) {
+        if idx >= self.swatches.len() {
+            return;
+        }
+        match self.floating.as_mut() {
+            Some(floating) if floating.source_index == Some(idx) => {
+                floating.transparent = !floating.transparent;
+            }
+            _ => {
+                self.end_paint_stroke();
+                let clipboard = self.swatches[idx].clone();
+                self.floating = Some(FloatingSelection {
+                    clipboard,
+                    transparent: false,
+                    source_index: Some(idx),
+                });
+                self.clear_selection();
+            }
         }
     }
 
@@ -723,7 +741,7 @@ impl App {
     }
 
     fn paste_clipboard(&mut self) {
-        let Some(clipboard) = self.clipboard.clone() else {
+        let Some(clipboard) = self.swatches.front().cloned() else {
             return;
         };
 
@@ -1335,6 +1353,14 @@ impl App {
                     return;
                 }
 
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(idx) = self.swatch_hit(mouse.column, mouse.row) {
+                        self.activate_swatch(idx);
+                        self.clamp_cursor();
+                        return;
+                    }
+                }
+
                 let canvas_pos = self.mouse_to_canvas(mouse.column, mouse.row);
 
                 if self.floating.is_some() {
@@ -1432,8 +1458,11 @@ impl App {
                 .intersects(KeyModifiers::ALT | KeyModifiers::META);
 
             match key.code {
-                KeyCode::Char('c') | KeyCode::Char('x') if ctrl => {
+                KeyCode::Char('t') if ctrl => {
                     self.toggle_float_transparency();
+                    return;
+                }
+                KeyCode::Char('c') | KeyCode::Char('x') if ctrl => {
                     return;
                 }
                 KeyCode::Char('v') if ctrl => {
@@ -1572,7 +1601,7 @@ mod tests {
         app.cursor = Pos { x: 0, y: 0 };
         app.mode = Mode::Select;
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell();
+        app.activate_swatch(0);
         app
     }
 
@@ -1913,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn double_copy_enters_floating_mode() {
+    fn copy_pushes_swatch_without_entering_floating() {
         let mut app = App::new();
         app.canvas.set(Pos { x: 1, y: 1 }, 'A');
         app.canvas.set(Pos { x: 2, y: 1 }, 'B');
@@ -1921,23 +1950,19 @@ mod tests {
         app.cursor = Pos { x: 2, y: 1 };
         app.mode = Mode::Select;
 
-        // First copy: captures clipboard
         app.copy_selection_or_cell();
-        assert!(app.clipboard.is_some());
+        assert_eq!(app.swatches.len(), 1);
         assert!(app.floating.is_none());
-
-        // Second copy on same selection: enters floating
-        app.copy_selection_or_cell();
-        assert!(app.floating.is_some());
-        assert_eq!(app.cursor, Pos { x: 1, y: 1 });
-        assert!(!app.mode.is_selecting());
-        // Original content untouched
         assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), 'A');
-        assert_eq!(app.canvas.get(Pos { x: 2, y: 1 }), 'B');
+
+        // Another copy on same selection: still no auto-lift, just another swatch push.
+        app.copy_selection_or_cell();
+        assert_eq!(app.swatches.len(), 2);
+        assert!(app.floating.is_none());
     }
 
     #[test]
-    fn double_cut_enters_floating_mode() {
+    fn cut_pushes_swatch_and_clears_canvas() {
         let mut app = App::new();
         app.canvas.set(Pos { x: 1, y: 1 }, 'X');
         app.canvas.set(Pos { x: 2, y: 1 }, 'Y');
@@ -1945,16 +1970,111 @@ mod tests {
         app.cursor = Pos { x: 2, y: 1 };
         app.mode = Mode::Select;
 
-        // First cut: captures and clears
         app.cut_selection_or_cell();
-        assert!(app.clipboard.is_some());
+        assert_eq!(app.swatches.len(), 1);
         assert!(app.floating.is_none());
         assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), ' ');
         assert_eq!(app.canvas.get(Pos { x: 2, y: 1 }), ' ');
+    }
 
-        // Second cut on same selection: enters floating (no double-clear)
-        app.cut_selection_or_cell();
+    #[test]
+    fn swatch_history_newest_first_and_capped() {
+        let mut app = App::new();
+        for (i, ch) in ['A', 'B', 'C', 'D', 'E', 'F'].iter().enumerate() {
+            app.canvas.set(Pos { x: i, y: 0 }, *ch);
+            app.cursor = Pos { x: i, y: 0 };
+            app.copy_selection_or_cell();
+        }
+
+        assert_eq!(app.swatches.len(), 5);
+        // Most recent is at index 0.
+        assert_eq!(
+            app.swatches[0].get(0, 0),
+            Some(CellValue::Narrow('F'))
+        );
+        // Oldest ('A') evicted once a sixth swatch pushed in.
+        assert_eq!(
+            app.swatches[4].get(0, 0),
+            Some(CellValue::Narrow('B'))
+        );
+    }
+
+    #[test]
+    fn activate_swatch_enters_floating_from_history() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 1, y: 1 }, 'A');
+        app.canvas.set(Pos { x: 2, y: 1 }, 'B');
+        app.selection_anchor = Some(Pos { x: 1, y: 1 });
+        app.cursor = Pos { x: 2, y: 1 };
+        app.mode = Mode::Select;
+
+        app.copy_selection_or_cell();
+        app.activate_swatch(0);
+
         assert!(app.floating.is_some());
+        assert_eq!(
+            app.floating.as_ref().unwrap().source_index,
+            Some(0)
+        );
+        assert!(!app.mode.is_selecting());
+        assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), 'A');
+    }
+
+    #[test]
+    fn activate_same_swatch_again_toggles_transparency() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+
+        app.activate_swatch(0);
+        assert!(!app.floating.as_ref().unwrap().transparent);
+
+        app.activate_swatch(0);
+        assert!(app.floating.as_ref().unwrap().transparent);
+
+        app.activate_swatch(0);
+        assert!(!app.floating.as_ref().unwrap().transparent);
+    }
+
+    #[test]
+    fn activate_different_swatch_switches_to_opaque() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.canvas.set(Pos { x: 1, y: 0 }, 'B');
+
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+        app.cursor = Pos { x: 1, y: 0 };
+        app.copy_selection_or_cell();
+
+        app.activate_swatch(0);
+        app.activate_swatch(0); // flip to transparent
+        assert!(app.floating.as_ref().unwrap().transparent);
+
+        app.activate_swatch(1); // switch: should be opaque again
+        assert_eq!(
+            app.floating.as_ref().unwrap().source_index,
+            Some(1)
+        );
+        assert!(!app.floating.as_ref().unwrap().transparent);
+    }
+
+    #[test]
+    fn ctrl_t_toggles_transparency_while_floating() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+        app.activate_swatch(0);
+
+        assert!(!app.floating.as_ref().unwrap().transparent);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(app.floating.as_ref().unwrap().transparent);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(!app.floating.as_ref().unwrap().transparent);
     }
 
     #[test]
@@ -1967,15 +2087,11 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell(); // enter floating
+        app.activate_swatch(0);
 
-        // Move float to new position
         app.cursor = Pos { x: 5, y: 3 };
-
-        // Stamp via Ctrl+V
         app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
 
-        // Float persists for repeated stamping
         assert!(app.floating.is_some());
         assert_eq!(app.canvas.get(Pos { x: 5, y: 3 }), 'A');
         assert_eq!(app.canvas.get(Pos { x: 6, y: 3 }), 'B');
@@ -1990,17 +2106,14 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell(); // enter floating
+        app.activate_swatch(0);
 
         app.cursor = Pos { x: 5, y: 5 };
-
-        // Dismiss with Esc
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(app.floating.is_none());
-        // Clipboard still intact
-        assert!(app.clipboard.is_some());
-        // Nothing stamped at (5,5)
+        // Swatch history still intact so the user can re-enter.
+        assert_eq!(app.swatches.len(), 1);
         assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), ' ');
     }
 
@@ -2013,7 +2126,7 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell(); // floating at (3,3)
+        app.activate_swatch(0);
 
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -2032,9 +2145,8 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell(); // enter floating
+        app.activate_swatch(0);
 
-        // Left click stamps at click position
         app.handle_event(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 7,
@@ -2048,56 +2160,13 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
 
-        // Float persists for repeated stamping
         assert!(app.floating.is_some());
         assert_eq!(app.canvas.get(Pos { x: 7, y: 4 }), 'M');
     }
 
     #[test]
-    fn different_bounds_copy_does_not_float() {
-        let mut app = App::new();
-        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
-        app.canvas.set(Pos { x: 1, y: 0 }, 'B');
-
-        // Copy single cell
-        app.cursor = Pos { x: 0, y: 0 };
-        app.copy_selection_or_cell();
-
-        // Copy different cell
-        app.cursor = Pos { x: 1, y: 0 };
-        app.copy_selection_or_cell();
-
-        assert!(app.floating.is_none());
-    }
-
-    #[test]
-    fn triple_copy_toggles_transparency() {
-        let mut app = App::new();
-        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
-        app.selection_anchor = Some(Pos { x: 0, y: 0 });
-        app.cursor = Pos { x: 0, y: 0 };
-        app.mode = Mode::Select;
-
-        app.copy_selection_or_cell(); // 1st: clipboard
-        app.copy_selection_or_cell(); // 2nd: float (opaque)
-
-        assert!(app.floating.is_some());
-        assert!(!app.floating.as_ref().unwrap().transparent);
-
-        // 3rd copy while floating: toggle to transparent
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.floating.is_some());
-        assert!(app.floating.as_ref().unwrap().transparent);
-
-        // 4th: toggle back to opaque
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(!app.floating.as_ref().unwrap().transparent);
-    }
-
-    #[test]
     fn transparent_stamp_preserves_underlying_content() {
         let mut app = App::new();
-        // Place "A B" in clipboard (A, space, B)
         app.canvas.set(Pos { x: 0, y: 0 }, 'A');
         app.canvas.set(Pos { x: 2, y: 0 }, 'B');
         app.selection_anchor = Some(Pos { x: 0, y: 0 });
@@ -2105,10 +2174,9 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell(); // opaque float
+        app.activate_swatch(0);
 
-        // Toggle to transparent
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert!(app.floating.as_ref().unwrap().transparent);
 
         // Place existing content at stamp target
@@ -2134,7 +2202,7 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell(); // floating
+        app.activate_swatch(0);
 
         // Paint stroke: click, drag to two positions, release
         app.handle_event(Event::Mouse(MouseEvent {
@@ -2186,7 +2254,7 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        app.copy_selection_or_cell(); // floating
+        app.activate_swatch(0);
 
         // Stamp at two positions
         app.cursor = Pos { x: 3, y: 3 };
