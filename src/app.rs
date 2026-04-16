@@ -1529,7 +1529,6 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        let key = reframe_cmd_as_ctrl(key);
         if self.floating.is_some() {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let alt = key
@@ -1669,27 +1668,6 @@ impl App {
 
 fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
     col >= rect.x && row >= rect.y && col < rect.x + rect.width && row < rect.y + rect.height
-}
-
-fn reframe_cmd_as_ctrl(key: KeyEvent) -> KeyEvent {
-    let has_meta = key.modifiers.contains(KeyModifiers::META);
-    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if !has_meta || has_ctrl {
-        return key;
-    }
-
-    let macos_shortcut = matches!(
-        key.code,
-        KeyCode::Char('c') | KeyCode::Char('x') | KeyCode::Char('v') | KeyCode::Char('z'),
-    );
-    if !macos_shortcut {
-        return key;
-    }
-
-    let mut modifiers = key.modifiers;
-    modifiers.remove(KeyModifiers::META);
-    modifiers.insert(KeyModifiers::CONTROL);
-    KeyEvent { modifiers, ..key }
 }
 
 fn swatch_home_row_index(ch: char) -> Option<usize> {
@@ -2219,41 +2197,6 @@ mod tests {
         // Pressing ^a again cycles transparency for the active swatch.
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert!(app.floating.as_ref().unwrap().transparent);
-    }
-
-    #[test]
-    fn cmd_shortcuts_alias_to_ctrl_for_macos() {
-        let mut app = App::new();
-        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
-        app.cursor = Pos { x: 0, y: 0 };
-
-        // Cmd+C captures a swatch just like Ctrl+C.
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::META));
-        assert_eq!(app.populated_swatch_count(), 1);
-
-        // Cmd+V pastes the most-recent swatch at the cursor.
-        app.cursor = Pos { x: 5, y: 5 };
-        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::META));
-        assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), 'A');
-
-        // Cmd+Z undoes the paste without touching the swatch history.
-        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::META));
-        assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), ' ');
-        assert_eq!(app.populated_swatch_count(), 1);
-    }
-
-    #[test]
-    fn alt_c_still_goes_to_system_clipboard() {
-        // Opt+C on macOS should keep working as the OS-copy shortcut even
-        // though Cmd+C now aliases to Ctrl+C (swatch copy).
-        let mut app = App::new();
-        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
-        app.cursor = Pos { x: 0, y: 0 };
-
-        // We can't observe the real system clipboard in tests, but we can
-        // confirm the keystroke doesn't push a swatch the way Cmd+C would.
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
-        assert_eq!(app.populated_swatch_count(), 0);
     }
 
     #[test]
