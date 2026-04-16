@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::io;
 
 use crossterm::event::{
@@ -12,6 +11,12 @@ use crate::emoji;
 
 const UNDO_DEPTH_CAP: usize = 500;
 pub const SWATCH_CAPACITY: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwatchZone {
+    Body,
+    Pin,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -93,6 +98,28 @@ impl Clipboard {
 }
 
 #[derive(Debug, Clone)]
+pub struct Swatch {
+    pub clipboard: Clipboard,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HelpTab {
+    #[default]
+    Common,
+    Advanced,
+}
+
+impl HelpTab {
+    pub fn toggle(self) -> Self {
+        match self {
+            HelpTab::Common => HelpTab::Advanced,
+            HelpTab::Advanced => HelpTab::Common,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct FloatingSelection {
     pub clipboard: Clipboard,
     pub transparent: bool,
@@ -112,17 +139,19 @@ pub struct App {
     pub mode: Mode,
     pub should_quit: bool,
     pub show_help: bool,
+    pub help_tab: HelpTab,
     pub emoji_picker_open: bool,
     pub viewport: Rect,
     pub viewport_origin: Pos,
     pub selection_anchor: Option<Pos>,
     drag_origin: Option<Pos>,
     pan_drag: Option<PanDrag>,
-    pub swatches: VecDeque<Clipboard>,
+    pub swatches: [Option<Swatch>; SWATCH_CAPACITY],
     pub floating: Option<FloatingSelection>,
     pub emoji_picker_state: emoji::EmojiPickerState,
     pub icon_catalog: Option<emoji::catalog::IconCatalogData>,
-    pub swatch_hit_boxes: [Option<Rect>; SWATCH_CAPACITY],
+    pub swatch_body_hits: [Option<Rect>; SWATCH_CAPACITY],
+    pub swatch_pin_hits: [Option<Rect>; SWATCH_CAPACITY],
     paint_canvas_before: Option<Canvas>,
     paint_stroke_anchor: Option<Pos>,
     paint_stroke_last: Option<Pos>,
@@ -138,17 +167,19 @@ impl App {
             mode: Mode::Draw,
             should_quit: false,
             show_help: false,
+            help_tab: HelpTab::default(),
             emoji_picker_open: false,
             viewport: Rect::default(),
             viewport_origin: Pos { x: 0, y: 0 },
             selection_anchor: None,
             drag_origin: None,
             pan_drag: None,
-            swatches: VecDeque::new(),
+            swatches: Default::default(),
             floating: None,
             emoji_picker_state: emoji::EmojiPickerState::default(),
             icon_catalog: None,
-            swatch_hit_boxes: [None; SWATCH_CAPACITY],
+            swatch_body_hits: [None; SWATCH_CAPACITY],
+            swatch_pin_hits: [None; SWATCH_CAPACITY],
             paint_canvas_before: None,
             paint_stroke_anchor: None,
             paint_stroke_last: None,
@@ -278,15 +309,17 @@ impl App {
         None
     }
 
-    fn swatch_hit(&self, col: u16, row: u16) -> Option<usize> {
-        for (idx, maybe_rect) in self.swatch_hit_boxes.iter().enumerate() {
+    fn swatch_hit(&self, col: u16, row: u16) -> Option<(usize, SwatchZone)> {
+        for (idx, maybe_rect) in self.swatch_pin_hits.iter().enumerate() {
             let Some(rect) = maybe_rect else { continue };
-            if col >= rect.x
-                && row >= rect.y
-                && col < rect.x + rect.width
-                && row < rect.y + rect.height
-            {
-                return Some(idx);
+            if rect_contains(rect, col, row) {
+                return Some((idx, SwatchZone::Pin));
+            }
+        }
+        for (idx, maybe_rect) in self.swatch_body_hits.iter().enumerate() {
+            let Some(rect) = maybe_rect else { continue };
+            if rect_contains(rect, col, row) {
+                return Some((idx, SwatchZone::Body));
             }
         }
         None
@@ -487,23 +520,59 @@ impl App {
     }
 
     fn push_swatch(&mut self, clipboard: Clipboard) {
-        self.swatches.push_front(clipboard);
-        while self.swatches.len() > SWATCH_CAPACITY {
-            self.swatches.pop_back();
+        let unpinned_slots: Vec<usize> = (0..SWATCH_CAPACITY)
+            .filter(|&i| !matches!(&self.swatches[i], Some(s) if s.pinned))
+            .collect();
+        if unpinned_slots.is_empty() {
+            return;
+        }
+
+        let mut queue: Vec<Swatch> = unpinned_slots
+            .iter()
+            .filter_map(|&i| self.swatches[i].take())
+            .collect();
+        queue.insert(
+            0,
+            Swatch {
+                clipboard,
+                pinned: false,
+            },
+        );
+        queue.truncate(unpinned_slots.len());
+
+        for (slot_idx, swatch) in unpinned_slots.iter().zip(queue.into_iter()) {
+            self.swatches[*slot_idx] = Some(swatch);
+        }
+    }
+
+    #[cfg(test)]
+    fn populated_swatch_count(&self) -> usize {
+        self.swatches.iter().filter(|s| s.is_some()).count()
+    }
+
+    pub fn toggle_pin(&mut self, idx: usize) {
+        if idx >= SWATCH_CAPACITY {
+            return;
+        }
+        if let Some(swatch) = self.swatches[idx].as_mut() {
+            swatch.pinned = !swatch.pinned;
         }
     }
 
     pub fn activate_swatch(&mut self, idx: usize) {
-        if idx >= self.swatches.len() {
+        if idx >= SWATCH_CAPACITY {
             return;
         }
+        let Some(swatch) = self.swatches[idx].as_ref() else {
+            return;
+        };
         match self.floating.as_mut() {
             Some(floating) if floating.source_index == Some(idx) => {
                 floating.transparent = !floating.transparent;
             }
             _ => {
+                let clipboard = swatch.clipboard.clone();
                 self.end_paint_stroke();
-                let clipboard = self.swatches[idx].clone();
                 self.floating = Some(FloatingSelection {
                     clipboard,
                     transparent: false,
@@ -741,7 +810,7 @@ impl App {
     }
 
     fn paste_clipboard(&mut self) {
-        let Some(clipboard) = self.swatches.front().cloned() else {
+        let Some(clipboard) = self.swatches[0].as_ref().map(|s| s.clipboard.clone()) else {
             return;
         };
 
@@ -1281,6 +1350,9 @@ impl App {
             KeyCode::Char('t') => return self.transpose_selection_corner(),
             KeyCode::Char('z') => self.undo(),
             KeyCode::Char(' ') | KeyCode::Null => self.smart_fill(),
+            KeyCode::Char(ch) if swatch_home_row_index(ch).is_some() => {
+                self.activate_swatch(swatch_home_row_index(ch).unwrap());
+            }
             _ => return false,
         }
 
@@ -1335,6 +1407,9 @@ impl App {
                         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.show_help = false
                         }
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            self.help_tab = self.help_tab.toggle();
+                        }
                         _ => {}
                     }
                     return;
@@ -1354,8 +1429,11 @@ impl App {
                 }
 
                 if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                    if let Some(idx) = self.swatch_hit(mouse.column, mouse.row) {
-                        self.activate_swatch(idx);
+                    if let Some((idx, zone)) = self.swatch_hit(mouse.column, mouse.row) {
+                        match zone {
+                            SwatchZone::Pin => self.toggle_pin(idx),
+                            SwatchZone::Body => self.activate_swatch(idx),
+                        }
                         self.clamp_cursor();
                         return;
                     }
@@ -1451,6 +1529,7 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        let key = reframe_cmd_as_ctrl(key);
         if self.floating.is_some() {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let alt = key
@@ -1460,6 +1539,10 @@ impl App {
             match key.code {
                 KeyCode::Char('t') if ctrl => {
                     self.toggle_float_transparency();
+                    return;
+                }
+                KeyCode::Char(ch) if ctrl && swatch_home_row_index(ch).is_some() => {
+                    self.activate_swatch(swatch_home_row_index(ch).unwrap());
                     return;
                 }
                 KeyCode::Char('c') | KeyCode::Char('x') if ctrl => {
@@ -1584,9 +1667,45 @@ impl App {
     }
 }
 
+fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && row >= rect.y && col < rect.x + rect.width && row < rect.y + rect.height
+}
+
+fn reframe_cmd_as_ctrl(key: KeyEvent) -> KeyEvent {
+    let has_meta = key.modifiers.contains(KeyModifiers::META);
+    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if !has_meta || has_ctrl {
+        return key;
+    }
+
+    let macos_shortcut = matches!(
+        key.code,
+        KeyCode::Char('c') | KeyCode::Char('x') | KeyCode::Char('v') | KeyCode::Char('z'),
+    );
+    if !macos_shortcut {
+        return key;
+    }
+
+    let mut modifiers = key.modifiers;
+    modifiers.remove(KeyModifiers::META);
+    modifiers.insert(KeyModifiers::CONTROL);
+    KeyEvent { modifiers, ..key }
+}
+
+fn swatch_home_row_index(ch: char) -> Option<usize> {
+    match ch {
+        'a' | 'A' => Some(0),
+        's' | 'S' => Some(1),
+        'd' | 'D' => Some(2),
+        'f' | 'F' => Some(3),
+        'g' | 'G' => Some(4),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{App, Mode};
+    use super::{App, Mode, SWATCH_CAPACITY};
     use crate::canvas::{CellValue, Pos};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1951,13 +2070,13 @@ mod tests {
         app.mode = Mode::Select;
 
         app.copy_selection_or_cell();
-        assert_eq!(app.swatches.len(), 1);
+        assert_eq!(app.populated_swatch_count(), 1);
         assert!(app.floating.is_none());
         assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), 'A');
 
         // Another copy on same selection: still no auto-lift, just another swatch push.
         app.copy_selection_or_cell();
-        assert_eq!(app.swatches.len(), 2);
+        assert_eq!(app.populated_swatch_count(), 2);
         assert!(app.floating.is_none());
     }
 
@@ -1971,7 +2090,7 @@ mod tests {
         app.mode = Mode::Select;
 
         app.cut_selection_or_cell();
-        assert_eq!(app.swatches.len(), 1);
+        assert_eq!(app.populated_swatch_count(), 1);
         assert!(app.floating.is_none());
         assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), ' ');
         assert_eq!(app.canvas.get(Pos { x: 2, y: 1 }), ' ');
@@ -1986,17 +2105,171 @@ mod tests {
             app.copy_selection_or_cell();
         }
 
-        assert_eq!(app.swatches.len(), 5);
+        assert_eq!(
+            app.swatches.iter().filter(|s| s.is_some()).count(),
+            5
+        );
         // Most recent is at index 0.
         assert_eq!(
-            app.swatches[0].get(0, 0),
+            app.swatches[0].as_ref().unwrap().clipboard.get(0, 0),
             Some(CellValue::Narrow('F'))
         );
         // Oldest ('A') evicted once a sixth swatch pushed in.
         assert_eq!(
-            app.swatches[4].get(0, 0),
+            app.swatches[4].as_ref().unwrap().clipboard.get(0, 0),
             Some(CellValue::Narrow('B'))
         );
+    }
+
+    #[test]
+    fn pinned_swatch_holds_slot_when_history_rotates() {
+        let mut app = App::new();
+        for (i, ch) in ['A', 'B', 'C'].iter().enumerate() {
+            app.canvas.set(Pos { x: i, y: 0 }, *ch);
+            app.cursor = Pos { x: i, y: 0 };
+            app.copy_selection_or_cell();
+        }
+        // Slot order after three copies: [C (idx 0), B (idx 1), A (idx 2), _, _].
+        assert_eq!(
+            app.swatches[1].as_ref().unwrap().clipboard.get(0, 0),
+            Some(CellValue::Narrow('B'))
+        );
+        app.toggle_pin(1);
+        assert!(app.swatches[1].as_ref().unwrap().pinned);
+
+        // Push three more; B at slot 1 must not move or get evicted.
+        for (i, ch) in ['D', 'E', 'F'].iter().enumerate() {
+            app.canvas.set(Pos { x: 10 + i, y: 0 }, *ch);
+            app.cursor = Pos { x: 10 + i, y: 0 };
+            app.copy_selection_or_cell();
+        }
+
+        // Slot 1 still B (pinned).
+        assert_eq!(
+            app.swatches[1].as_ref().unwrap().clipboard.get(0, 0),
+            Some(CellValue::Narrow('B'))
+        );
+        assert!(app.swatches[1].as_ref().unwrap().pinned);
+        // Newest (F) sits at slot 0.
+        assert_eq!(
+            app.swatches[0].as_ref().unwrap().clipboard.get(0, 0),
+            Some(CellValue::Narrow('F'))
+        );
+    }
+
+    #[test]
+    fn all_pinned_swatches_reject_new_push() {
+        let mut app = App::new();
+        for (i, ch) in ['A', 'B', 'C', 'D', 'E'].iter().enumerate() {
+            app.canvas.set(Pos { x: i, y: 0 }, *ch);
+            app.cursor = Pos { x: i, y: 0 };
+            app.copy_selection_or_cell();
+        }
+        for i in 0..SWATCH_CAPACITY {
+            app.toggle_pin(i);
+        }
+        let before: Vec<_> = app
+            .swatches
+            .iter()
+            .map(|s| s.as_ref().unwrap().clipboard.get(0, 0))
+            .collect();
+
+        app.canvas.set(Pos { x: 20, y: 0 }, 'Z');
+        app.cursor = Pos { x: 20, y: 0 };
+        app.copy_selection_or_cell();
+
+        let after: Vec<_> = app
+            .swatches
+            .iter()
+            .map(|s| s.as_ref().unwrap().clipboard.get(0, 0))
+            .collect();
+        assert_eq!(before, after, "all-pinned strip should reject new copies");
+    }
+
+    #[test]
+    fn ctrl_home_row_activates_swatch() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.floating.is_some());
+        assert_eq!(app.floating.as_ref().unwrap().source_index, Some(0));
+    }
+
+    #[test]
+    fn ctrl_home_row_while_floating_switches_or_cycles_swatch() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+        app.canvas.set(Pos { x: 1, y: 0 }, 'B');
+        app.cursor = Pos { x: 1, y: 0 };
+        app.copy_selection_or_cell();
+
+        app.activate_swatch(1); // lift from the older swatch (A at slot 1)
+        assert_eq!(app.floating.as_ref().unwrap().source_index, Some(1));
+
+        // ^a while floating switches to slot 0 (B).
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.floating.as_ref().unwrap().source_index, Some(0));
+        assert!(!app.floating.as_ref().unwrap().transparent);
+
+        // Pressing ^a again cycles transparency for the active swatch.
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.floating.as_ref().unwrap().transparent);
+    }
+
+    #[test]
+    fn cmd_shortcuts_alias_to_ctrl_for_macos() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+
+        // Cmd+C captures a swatch just like Ctrl+C.
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::META));
+        assert_eq!(app.populated_swatch_count(), 1);
+
+        // Cmd+V pastes the most-recent swatch at the cursor.
+        app.cursor = Pos { x: 5, y: 5 };
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::META));
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), 'A');
+
+        // Cmd+Z undoes the paste without touching the swatch history.
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::META));
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), ' ');
+        assert_eq!(app.populated_swatch_count(), 1);
+    }
+
+    #[test]
+    fn alt_c_still_goes_to_system_clipboard() {
+        // Opt+C on macOS should keep working as the OS-copy shortcut even
+        // though Cmd+C now aliases to Ctrl+C (swatch copy).
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+
+        // We can't observe the real system clipboard in tests, but we can
+        // confirm the keystroke doesn't push a swatch the way Cmd+C would.
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+        assert_eq!(app.populated_swatch_count(), 0);
+    }
+
+    #[test]
+    fn bare_digit_draws_even_while_floating() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+        app.activate_swatch(0);
+        assert!(app.floating.is_some());
+
+        // Pressing '1' now dismisses the lift and draws the digit like any other char.
+        app.cursor = Pos { x: 5, y: 5 };
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert!(app.floating.is_none());
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), '1');
     }
 
     #[test]
@@ -2113,7 +2386,7 @@ mod tests {
 
         assert!(app.floating.is_none());
         // Swatch history still intact so the user can re-enter.
-        assert_eq!(app.swatches.len(), 1);
+        assert_eq!(app.populated_swatch_count(), 1);
         assert_eq!(app.canvas.get(Pos { x: 5, y: 5 }), ' ');
     }
 

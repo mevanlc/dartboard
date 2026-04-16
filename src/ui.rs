@@ -4,8 +4,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Clipboard, SWATCH_CAPACITY};
+use crate::app::{App, HelpTab, Swatch, SWATCH_CAPACITY};
 use crate::canvas::{CellValue, Pos};
 use crate::emoji;
 use crate::theme;
@@ -20,10 +21,16 @@ const PLACEHOLDER_USERS: &[&str] = &[
 const USER_LIST_MIN_WIDTH: u16 = 12;
 const USER_LIST_MAX_WIDTH: u16 = 24;
 
-const SWATCH_BOX_WIDTH: u16 = 15;
-const SWATCH_BOX_HEIGHT: u16 = 6;
+const SWATCH_BOX_WIDTH: u16 = 16;
+const SWATCH_BOX_HEIGHT: u16 = 8;
 const SWATCH_GAP: u16 = 1;
-const SWATCH_STRIP_RESERVED_ROWS: u16 = SWATCH_BOX_HEIGHT - 1;
+const SWATCH_MARGIN_RIGHT: u16 = 1;
+const SWATCH_MARGIN_BOTTOM: u16 = 1;
+const PIN_UNPINNED: char = '📌';
+const PIN_PINNED: char = '📍';
+
+const HELP_SEPARATOR: &str = "  │  ";
+const HELP_SEPARATOR_COLS: u16 = 5;
 
 struct CanvasWidget<'a> {
     app: &'a App,
@@ -105,29 +112,18 @@ impl<'a> Widget for CanvasWidget<'a> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let full = frame.area();
-    let strip_rows = if full.height > SWATCH_STRIP_RESERVED_ROWS + 3 {
-        SWATCH_STRIP_RESERVED_ROWS
-    } else {
-        0
-    };
-    let area = Rect::new(
-        full.x,
-        full.y + strip_rows,
-        full.width,
-        full.height.saturating_sub(strip_rows),
-    );
+    let area = frame.area();
 
     let title = if let Some(ref floating) = app.floating {
         if floating.transparent {
-            " dartboard \u{00b7} lifted (see-thru) \u{00b7} Esc to cancel ".to_string()
+            " dartboard \u{00b7} lifted (see-thru) \u{00b7} esc to cancel ".to_string()
         } else {
-            " dartboard \u{00b7} lifted \u{00b7} Esc to cancel ".to_string()
+            " dartboard \u{00b7} lifted \u{00b7} esc to cancel ".to_string()
         }
     } else {
         format!(
-            " dartboard \u{00b7} {} for help \u{00b7} {} glyphs ",
-            "^P", "^]"
+            " dartboard \u{00b7} {} for help \u{00b7} {} glyphs \u{00b7} {} quit ",
+            "^P", "^]", "^Q"
         )
     };
     let outer = Block::default()
@@ -143,12 +139,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.set_viewport(canvas_area);
 
     frame.render_widget(CanvasWidget { app }, canvas_area);
-    render_user_list(frame, canvas_area);
-    if strip_rows > 0 {
-        render_swatch_strip(frame.buffer_mut(), full, area, app);
-    } else {
-        app.swatch_hit_boxes = [None; SWATCH_CAPACITY];
-    }
+    let user_list_rect = render_user_list(frame, canvas_area);
+    render_swatch_strip(frame, canvas_area, app);
 
     // Cursor position
     let cursor_visible = !app.show_help
@@ -160,11 +152,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if cursor_visible {
         let cx = (app.cursor.x - app.viewport_origin.x) as u16 + canvas_area.x;
         let cy = (app.cursor.y - app.viewport_origin.y) as u16 + canvas_area.y;
-        frame.set_cursor_position((cx, cy));
+        let point_in = |rect: &Rect| {
+            cx >= rect.x && cx < rect.x + rect.width && cy >= rect.y && cy < rect.y + rect.height
+        };
+        let under_overlay = app.swatch_body_hits.iter().flatten().any(point_in)
+            || user_list_rect.as_ref().map_or(false, point_in);
+        if !under_overlay {
+            frame.set_cursor_position((cx, cy));
+        }
     }
 
     if app.show_help {
-        render_help(frame, area);
+        render_help(frame, area, app);
     }
 
     if app.emoji_picker_open {
@@ -174,41 +173,43 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_swatch_strip(buf: &mut Buffer, full: Rect, artboard: Rect, app: &mut App) {
-    app.swatch_hit_boxes = [None; SWATCH_CAPACITY];
+fn render_swatch_strip(frame: &mut Frame, canvas_area: Rect, app: &mut App) {
+    app.swatch_body_hits = [None; SWATCH_CAPACITY];
+    app.swatch_pin_hits = [None; SWATCH_CAPACITY];
 
-    let strip_total_width =
-        SWATCH_BOX_WIDTH * SWATCH_CAPACITY as u16 + SWATCH_GAP * (SWATCH_CAPACITY as u16 - 1);
-
-    if artboard.width < 4 || full.width < SWATCH_BOX_WIDTH + 2 {
+    if canvas_area.width < SWATCH_BOX_WIDTH + SWATCH_MARGIN_RIGHT
+        || canvas_area.height < SWATCH_BOX_HEIGHT + SWATCH_MARGIN_BOTTOM
+    {
         return;
     }
 
-    let right_inset: u16 = 1;
-    let right_edge = artboard.x + artboard.width - right_inset;
-    let desired_left = right_edge.saturating_sub(strip_total_width);
-    let min_left = full.x + 1;
-    let strip_left = desired_left.max(min_left);
-    let strip_right = right_edge.min(full.x + full.width);
-    let available = strip_right.saturating_sub(strip_left);
+    let right_edge = canvas_area.x + canvas_area.width - SWATCH_MARGIN_RIGHT;
+    let available_width = right_edge - canvas_area.x;
+    let strip_right = right_edge;
+    let n_visible = ((available_width + SWATCH_GAP) / (SWATCH_BOX_WIDTH + SWATCH_GAP))
+        .min(SWATCH_CAPACITY as u16);
+    if n_visible == 0 {
+        return;
+    }
+    let box_y = canvas_area.y + canvas_area.height - SWATCH_MARGIN_BOTTOM - SWATCH_BOX_HEIGHT;
 
-    let artboard_top_row = artboard.y;
     let active_idx = app
         .floating
         .as_ref()
         .and_then(|floating| floating.source_index);
 
     for idx in 0..SWATCH_CAPACITY {
-        let offset_from_right =
-            (SWATCH_CAPACITY as u16 - 1 - idx as u16) * (SWATCH_BOX_WIDTH + SWATCH_GAP);
-        if offset_from_right + SWATCH_BOX_WIDTH > available {
+        if (idx as u16) >= n_visible {
             continue;
         }
+        let offset_from_right =
+            (n_visible - 1 - idx as u16) * (SWATCH_BOX_WIDTH + SWATCH_GAP);
         let box_x = strip_right - offset_from_right - SWATCH_BOX_WIDTH;
-        let box_y = full.y;
         let rect = Rect::new(box_x, box_y, SWATCH_BOX_WIDTH, SWATCH_BOX_HEIGHT);
 
-        let swatch = app.swatches.get(idx);
+        frame.render_widget(Clear, rect);
+
+        let swatch = app.swatches[idx].as_ref();
         let is_active = active_idx == Some(idx);
         let is_transparent = is_active
             && app
@@ -217,19 +218,27 @@ fn render_swatch_strip(buf: &mut Buffer, full: Rect, artboard: Rect, app: &mut A
                 .map(|floating| floating.transparent)
                 .unwrap_or(false);
 
-        render_swatch_box(buf, rect, artboard_top_row, swatch, is_active, is_transparent);
-        app.swatch_hit_boxes[idx] = Some(rect);
+        let (body_rect, pin_rect) = render_swatch_box(
+            frame.buffer_mut(),
+            rect,
+            idx,
+            swatch,
+            is_active,
+            is_transparent,
+        );
+        app.swatch_body_hits[idx] = Some(body_rect);
+        app.swatch_pin_hits[idx] = pin_rect;
     }
 }
 
 fn render_swatch_box(
     buf: &mut Buffer,
     rect: Rect,
-    artboard_top_row: u16,
-    swatch: Option<&Clipboard>,
+    idx: usize,
+    swatch: Option<&Swatch>,
     is_active: bool,
     is_transparent: bool,
-) {
+) -> (Rect, Option<Rect>) {
     let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
     for dy in 0..inner.height {
         for dx in 0..inner.width {
@@ -254,51 +263,81 @@ fn render_swatch_box(
     let right_col = rect.x + rect.width - 1;
 
     buf[(left_col, top_row)]
-        .set_char('┌')
+        .set_char('╭')
         .set_style(border_style);
     buf[(right_col, top_row)]
-        .set_char('┐')
+        .set_char('╮')
+        .set_style(border_style);
+    buf[(left_col, bottom_row)]
+        .set_char('╰')
+        .set_style(border_style);
+    buf[(right_col, bottom_row)]
+        .set_char('╯')
         .set_style(border_style);
     for x in (left_col + 1)..right_col {
         buf[(x, top_row)].set_char('─').set_style(border_style);
+        buf[(x, bottom_row)].set_char('─').set_style(border_style);
     }
     for y in (top_row + 1)..bottom_row {
         buf[(left_col, y)].set_char('│').set_style(border_style);
         buf[(right_col, y)].set_char('│').set_style(border_style);
     }
 
-    if bottom_row == artboard_top_row {
-        buf[(left_col, bottom_row)]
-            .set_char('┴')
-            .set_style(border_style);
-        buf[(right_col, bottom_row)]
-            .set_char('┴')
-            .set_style(border_style);
-    } else {
-        buf[(left_col, bottom_row)]
-            .set_char('└')
-            .set_style(border_style);
-        buf[(right_col, bottom_row)]
-            .set_char('┘')
-            .set_style(border_style);
-        for x in (left_col + 1)..right_col {
-            buf[(x, bottom_row)].set_char('─').set_style(border_style);
-        }
+    if let Some(swatch) = swatch {
+        render_swatch_preview(buf, inner, &swatch.clipboard);
     }
+
+    let digit = char::from_digit(idx as u32 + 1, 10).unwrap_or('?');
+    let digit_col = right_col - 1;
+    let digit_row = inner.y;
+    let digit_style = if swatch.is_some() {
+        Style::default()
+            .fg(theme::HIGHLIGHT)
+            .bg(theme::OOB_BG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme::MUTED_GREATER)
+            .bg(theme::OOB_BG)
+    };
+    buf[(digit_col, digit_row)]
+        .set_char(digit)
+        .set_style(digit_style);
 
     if is_transparent {
-        let marker_x = right_col - 1;
-        buf[(marker_x, top_row)]
+        let marker_col = right_col - 2;
+        buf[(marker_col, digit_row)]
             .set_char('◌')
-            .set_style(Style::default().fg(theme::HIGHLIGHT));
+            .set_style(Style::default().fg(theme::HIGHLIGHT).bg(theme::OOB_BG));
     }
 
-    let Some(clipboard) = swatch else {
-        return;
-    };
+    let pin_rect = swatch.map(|swatch| {
+        let pin_char = if swatch.pinned {
+            PIN_PINNED
+        } else {
+            PIN_UNPINNED
+        };
+        let pin_col = right_col - 2;
+        let pin_row = inner.y + inner.height - 1;
+        let pin_style = Style::default().bg(theme::OOB_BG).fg(if swatch.pinned {
+            theme::HIGHLIGHT
+        } else {
+            theme::MUTED
+        });
+        buf[(pin_col, pin_row)].set_char(pin_char).set_style(pin_style);
+        buf[(pin_col + 1, pin_row)]
+            .set_char(' ')
+            .set_style(pin_style);
+        Rect::new(pin_col, pin_row, 2, 1)
+    });
 
+    let body_rect = Rect::new(rect.x, rect.y, rect.width, rect.height);
+    (body_rect, pin_rect)
+}
+
+fn render_swatch_preview(buf: &mut Buffer, inner: Rect, clipboard: &crate::app::Clipboard) {
     let (crop_x, crop_y) = clipboard_preview_offset(clipboard);
-    let preview_style = Style::default().fg(theme::TEXT).bg(theme::OOB_BG);
+    let preview_style = Style::default().fg(theme::TEXT).bg(theme::FLOAT_BG);
 
     for dy in 0..inner.height {
         let cy = crop_y + dy as usize;
@@ -332,6 +371,9 @@ fn render_swatch_box(
                     dx += 2;
                 }
                 Some(CellValue::WideCont) | None => {
+                    buf[(inner.x + dx, inner.y + dy)]
+                        .set_char(' ')
+                        .set_style(preview_style);
                     dx += 1;
                 }
             }
@@ -339,7 +381,13 @@ fn render_swatch_box(
     }
 }
 
-fn clipboard_preview_offset(clipboard: &Clipboard) -> (usize, usize) {
+fn clipboard_preview_offset(clipboard: &crate::app::Clipboard) -> (usize, usize) {
+    let has_visible = (0..clipboard.height)
+        .any(|y| (0..clipboard.width).any(|x| cell_is_visible(clipboard.get(x, y))));
+    if !has_visible {
+        return (0, 0);
+    }
+
     let mut first_row = 0;
     'outer_row: for y in 0..clipboard.height {
         for x in 0..clipboard.width {
@@ -416,9 +464,9 @@ fn render_pan_indicators(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-fn render_user_list(frame: &mut Frame, canvas_area: Rect) {
+fn render_user_list(frame: &mut Frame, canvas_area: Rect) -> Option<Rect> {
     if canvas_area.width < 6 || canvas_area.height < 3 {
-        return;
+        return None;
     }
 
     let longest_name = PLACEHOLDER_USERS
@@ -431,7 +479,7 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect) {
         .min(canvas_area.width);
     let height = (PLACEHOLDER_USERS.len() as u16 + 2).min(canvas_area.height);
     if width < 4 || height < 3 {
-        return;
+        return None;
     }
 
     let panel = Rect::new(
@@ -460,7 +508,7 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect) {
     frame.render_widget(block, panel);
 
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return Some(panel);
     }
 
     let max_name_width = inner.width as usize;
@@ -475,9 +523,11 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect) {
         Paragraph::new(text).style(Style::default().fg(theme::TEXT)),
         inner,
     );
+
+    Some(panel)
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     let width = 92u16.min(area.width.saturating_sub(4));
     let height = 24u16.min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
@@ -491,211 +541,207 @@ fn render_help(frame: &mut Frame, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::ACCENT))
         .title(Span::styled(
-            " Help ",
+            " help ",
             Style::default().fg(theme::HIGHLIGHT),
-        ));
+        ))
+        .title(
+            Line::from(vec![
+                Span::styled("tab", Style::default().fg(theme::ACCENT)),
+                Span::raw(" "),
+                Span::styled("switch ", Style::default().fg(theme::MUTED)),
+            ])
+            .right_aligned(),
+        );
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    if inner.height < 3 || inner.width < 10 {
+        return;
+    }
+
+    let tab_row = Rect::new(inner.x, inner.y, inner.width, 1);
+    render_help_tabs(frame.buffer_mut(), tab_row, app.help_tab);
+
+    let content = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+
+    match app.help_tab {
+        HelpTab::Common => render_help_common(frame, content),
+        HelpTab::Advanced => render_help_advanced(frame, content),
+    }
+}
+
+fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) {
+    let tabs = [("common", HelpTab::Common), ("advanced", HelpTab::Advanced)];
+    let mut x = area.x + 1;
+    for (label, tab) in tabs.iter() {
+        let is_active = *tab == active;
+        let indicator = if is_active { "•" } else { " " };
+        let cell_style = if is_active {
+            Style::default()
+                .fg(theme::HIGHLIGHT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::MUTED)
+        };
+        let text = format!("[{indicator}] {label}");
+        for ch in text.chars() {
+            if x >= area.x + area.width {
+                break;
+            }
+            buf[(x, area.y)].set_char(ch).set_style(cell_style);
+            x += 1;
+        }
+        // spacing between tabs
+        for _ in 0..2 {
+            if x >= area.x + area.width {
+                break;
+            }
+            buf[(x, area.y)]
+                .set_char(' ')
+                .set_style(Style::default().fg(theme::MUTED));
+            x += 1;
+        }
+    }
+}
+
+fn help_styles() -> (Style, Style, Style, Style) {
     let heading = Style::default()
         .fg(theme::ACCENT)
         .add_modifier(Modifier::BOLD);
     let sep = Style::default().fg(theme::MUTED_GREATER);
     let key = Style::default().fg(theme::HIGHLIGHT);
     let desc = Style::default().fg(theme::MUTED);
-    let top_width = inner.width.saturating_sub(3) / 2;
-    let right_width = inner.width.saturating_sub(top_width + 3);
-    let bottom_right_width = right_width.saturating_sub(3) / 2;
-    let bottom_far_right_width = right_width.saturating_sub(bottom_right_width + 3);
-    let text = Text::from(vec![
-        two_col_line(
-            section_title_line("Drawing", top_width as usize, heading),
-            section_title_line("Selection", right_width as usize, heading),
-        ),
-        two_col_line(
-            section_divider_line(top_width as usize, sep),
-            section_divider_line(right_width as usize, sep),
-        ),
-        two_col_line(
-            help_entry_line("<type>", "draw character", top_width as usize, key, desc),
-            help_entry_line(
-                "Shift+arrows",
-                "create/extend selection",
-                right_width as usize,
-                key,
-                desc,
-            ),
-        ),
-        two_col_line(
-            help_entry_line("Backspace", "erase backward", top_width as usize, key, desc),
-            help_entry_line(
-                "click+drag",
-                "block select with mouse",
-                right_width as usize,
-                key,
-                desc,
-            ),
-        ),
-        two_col_line(
-            help_entry_line("Delete", "erase at cursor", top_width as usize, key, desc),
-            help_entry_line(
-                "right-drag",
-                "pan viewport",
-                right_width as usize,
-                key,
-                desc,
-            ),
-        ),
-        two_col_line(
-            help_entry_line("arrows", "move cursor", top_width as usize, key, desc),
-            help_entry_line("<type>", "fill selection", right_width as usize, key, desc),
-        ),
-        two_col_line(
-            help_entry_line("Alt+arrows", "pan viewport", top_width as usize, key, desc),
-            help_entry_line(
-                "Bksp / Del",
-                "clear selection",
-                right_width as usize,
-                key,
-                desc,
-            ),
-        ),
-        two_col_line(
-            help_entry_line(
-                "Home / End",
-                "left / right edge",
-                top_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line(
-                "Esc / arrow",
-                "cancel selection",
-                right_width as usize,
-                key,
-                desc,
-            ),
-        ),
-        two_col_line(
-            help_entry_line(
-                "PgUp / PgDn",
-                "top / bottom edge",
-                top_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line(
-                "Alt+click",
-                "extend selection",
-                right_width as usize,
-                key,
-                desc,
-            ),
-        ),
-        two_col_line(
-            help_entry_line("Enter", "move down", top_width as usize, key, desc),
-            help_entry_line(
-                "^T",
-                "flip corner / see-thru",
-                right_width as usize,
-                key,
-                desc,
-            ),
-        ),
-        two_col_line(
-            blank_line(top_width as usize),
-            blank_line(right_width as usize),
-        ),
-        three_col_line(
-            section_title_line("Transform", top_width as usize, heading),
-            section_title_line("Clipboard", bottom_right_width as usize, heading),
-            section_title_line("Session", bottom_far_right_width as usize, heading),
-        ),
-        two_col_line(
-            section_divider_line(top_width as usize, sep),
-            section_divider_line(right_width as usize, sep),
-        ),
-        three_col_line(
-            help_entry_line(
-                "^H ^J ^K ^L",
-                "push left/down/up/right",
-                top_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line(
-                "^X",
-                "cut → swatch",
-                bottom_right_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line_with_key_width(
-                "^Z ^R",
-                "undo / redo",
-                bottom_far_right_width as usize,
-                6,
-                key,
-                desc,
-            ),
-        ),
-        three_col_line(
-            help_entry_line(
-                "^Y ^U ^I ^O",
-                "pull left/down/up/right",
-                top_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line(
-                "^C",
-                "copy → swatch",
-                bottom_right_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line_with_key_width(
-                "^P",
-                "help toggle",
-                bottom_far_right_width as usize,
-                6,
-                key,
-                desc,
-            ),
-        ),
-        three_col_line(
-            help_entry_line(
-                "^Space",
-                "fill selection or cell",
-                top_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line(
-                "^V",
-                "paste / stamp",
-                bottom_right_width as usize,
-                key,
-                desc,
-            ),
-            help_entry_line_with_key_width(
-                "^Q",
-                "quit",
-                bottom_far_right_width as usize,
-                6,
-                key,
-                desc,
-            ),
-        ),
-        three_col_line(
-            help_entry_line("^B", "draw selection border", top_width as usize, key, desc),
-            help_entry_line("Alt+C", "OS copy", bottom_right_width as usize, key, desc),
-            blank_line(bottom_far_right_width as usize),
-        ),
-    ]);
+    (heading, sep, key, desc)
+}
 
-    frame.render_widget(Paragraph::new(text), inner);
+fn render_help_common(frame: &mut Frame, area: Rect) {
+    let (heading, sep, key, desc) = help_styles();
+    let col_width = area.width.saturating_sub(HELP_SEPARATOR_COLS) / 2;
+    let right_col_width = area
+        .width
+        .saturating_sub(col_width + HELP_SEPARATOR_COLS);
+
+    let drawing: Vec<(&str, &str)> = vec![
+        ("<type>", "draw character"),
+        ("backspace", "erase backward"),
+        ("delete", "erase at cursor"),
+        ("arrows", "move cursor"),
+        ("alt+arrows", "pan viewport"),
+        ("home / end", "left / right edge"),
+        ("pgup / pgdn", "top / bottom edge"),
+        ("enter", "move down"),
+    ];
+    let selection: Vec<(&str, &str)> = vec![
+        ("shift+arrows", "create/extend selection"),
+        ("click+drag", "block select with mouse"),
+        ("right-drag", "pan viewport"),
+        ("<type>", "fill selection"),
+        ("bksp / del", "clear selection"),
+        ("esc / arrow", "cancel selection"),
+        ("alt+click", "extend selection"),
+        ("^T", "flip corner / see-thru"),
+    ];
+    let clipboard: Vec<(&str, &str)> = vec![
+        ("^X", "cut → swatch"),
+        ("^C", "copy → swatch"),
+        ("^V", "paste / stamp"),
+        ("alt+c", "os copy"),
+        ("^a ^s ^d ^f ^g", "lift swatch 1..5"),
+        ("📌", "pin"),
+    ];
+    let session: Vec<(&str, &str)> = vec![
+        ("^Z ^R", "undo / redo"),
+        ("^P", "help toggle"),
+        ("^Q", "quit"),
+    ];
+
+    let top_rows = drawing.len().max(selection.len());
+    let bottom_rows = clipboard.len().max(session.len());
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(top_rows + bottom_rows + 4);
+    lines.push(two_col_line(
+        section_title_line("drawing", col_width as usize, heading),
+        section_title_line("selection", right_col_width as usize, heading),
+    ));
+    lines.push(two_col_line(
+        section_divider_line(col_width as usize, sep),
+        section_divider_line(right_col_width as usize, sep),
+    ));
+    for i in 0..top_rows {
+        let left = match drawing.get(i) {
+            Some((k, d)) => help_entry_line(k, d, col_width as usize, key, desc),
+            None => blank_line(col_width as usize),
+        };
+        let right = match selection.get(i) {
+            Some((k, d)) => help_entry_line(k, d, right_col_width as usize, key, desc),
+            None => blank_line(right_col_width as usize),
+        };
+        lines.push(two_col_line(left, right));
+    }
+    lines.push(two_col_line(
+        blank_line(col_width as usize),
+        blank_line(right_col_width as usize),
+    ));
+    lines.push(two_col_line(
+        section_title_line("clipboard", col_width as usize, heading),
+        section_title_line("session", right_col_width as usize, heading),
+    ));
+    lines.push(two_col_line(
+        section_divider_line(col_width as usize, sep),
+        section_divider_line(right_col_width as usize, sep),
+    ));
+    for i in 0..bottom_rows {
+        let left = match clipboard.get(i) {
+            Some((k, d)) => help_entry_line(k, d, col_width as usize, key, desc),
+            None => blank_line(col_width as usize),
+        };
+        let right = match session.get(i) {
+            Some((k, d)) => help_entry_line(k, d, right_col_width as usize, key, desc),
+            None => blank_line(right_col_width as usize),
+        };
+        lines.push(two_col_line(left, right));
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn render_help_advanced(frame: &mut Frame, area: Rect) {
+    let (heading, sep, key, desc) = help_styles();
+    let col_width = area.width.saturating_sub(HELP_SEPARATOR_COLS) / 2;
+    let right_col_width = area
+        .width
+        .saturating_sub(col_width + HELP_SEPARATOR_COLS);
+
+    let transform: Vec<(&str, &str)> = vec![
+        ("^H ^J ^K ^L", "push left/down/up/right"),
+        ("^Y ^U ^I ^O", "pull left/down/up/right"),
+        ("^B", "draw selection border"),
+        ("^space", "fill selection or cell"),
+    ];
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(two_col_line(
+        section_title_line("transform", col_width as usize, heading),
+        blank_line(right_col_width as usize),
+    ));
+    lines.push(two_col_line(
+        section_divider_line(col_width as usize, sep),
+        blank_line(right_col_width as usize),
+    ));
+    for (k, d) in transform.iter() {
+        lines.push(two_col_line(
+            help_entry_line(k, d, col_width as usize, key, desc),
+            blank_line(right_col_width as usize),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn section_title_line(title: &str, width: usize, hs: Style) -> Line<'static> {
@@ -704,10 +750,9 @@ fn section_title_line(title: &str, width: usize, hs: Style) -> Line<'static> {
     }
 
     let label_width = width.saturating_sub(2);
-    Line::from(vec![Span::styled(
-        format!(" {:<label_width$} ", truncate_text(title, label_width)),
-        hs,
-    )])
+    let label = truncate_display(title, label_width);
+    let padded = pad_right_display(&label, label_width);
+    Line::from(vec![Span::styled(format!(" {padded} "), hs)])
 }
 
 fn section_divider_line(width: usize, sep: Style) -> Line<'static> {
@@ -732,12 +777,16 @@ fn help_entry_line_with_key_width(
     }
 
     let key_width = key_width.min(width.saturating_sub(1));
-    let left = format!(" {:<key_width$} ", truncate_text(k, key_width));
-    let desc_width = width.saturating_sub(left.chars().count());
+    let key_label = truncate_display(k, key_width);
+    let key_padded = pad_right_display(&key_label, key_width);
+    let left = format!(" {key_padded} ");
+    let desc_width = width.saturating_sub(display_width(&left));
+    let desc_label = truncate_display(d, desc_width);
+    let desc_padded = pad_right_display(&desc_label, desc_width);
 
     Line::from(vec![
         Span::styled(left, ks),
-        Span::styled(format!("{:<desc_width$}", truncate_text(d, desc_width)), ds),
+        Span::styled(desc_padded, ds),
     ])
 }
 
@@ -748,55 +797,55 @@ fn blank_line(width: usize) -> Line<'static> {
 fn two_col_line(left: Line<'static>, right: Line<'static>) -> Line<'static> {
     let mut spans = left.spans;
     spans.push(Span::styled(
-        "  │  ",
+        HELP_SEPARATOR,
         Style::default().fg(theme::MUTED_GREATER),
     ));
     spans.extend(right.spans);
     Line::from(spans)
 }
 
-fn three_col_line(
-    left: Line<'static>,
-    middle: Line<'static>,
-    right: Line<'static>,
-) -> Line<'static> {
-    let mut spans = left.spans;
-    spans.push(Span::styled(
-        "  │  ",
-        Style::default().fg(theme::MUTED_GREATER),
-    ));
-    spans.extend(middle.spans);
-    spans.push(Span::styled("│", Style::default().fg(theme::MUTED_GREATER)));
-    spans.extend(right.spans);
-    Line::from(spans)
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
 }
 
-fn truncate_text(text: &str, max_width: usize) -> String {
-    if text.chars().count() <= max_width {
+fn truncate_display(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
         return text.to_string();
     }
-
-    match max_width {
-        0 => String::new(),
-        1..=3 => ".".repeat(max_width),
-        _ => {
-            let prefix: String = text.chars().take(max_width - 3).collect();
-            format!("{prefix}...")
-        }
+    if max_width == 0 {
+        return String::new();
     }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let prefix_budget = max_width - 3;
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > prefix_budget {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    format!("{out}...")
+}
+
+fn pad_right_display(s: &str, width: usize) -> String {
+    let d = display_width(s);
+    if d >= width {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + (width - d));
+    out.push_str(s);
+    for _ in 0..(width - d) {
+        out.push(' ');
+    }
+    out
 }
 
 fn truncate_label(text: &str, max_width: usize) -> String {
-    if text.chars().count() <= max_width {
-        return text.to_string();
-    }
-
-    match max_width {
-        0 => String::new(),
-        1..=3 => ".".repeat(max_width),
-        _ => {
-            let prefix: String = text.chars().take(max_width - 3).collect();
-            format!("{prefix}...")
-        }
-    }
+    truncate_display(text, max_width)
 }

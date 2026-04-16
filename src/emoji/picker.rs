@@ -79,16 +79,16 @@ pub fn render(f: &mut Frame, area: Rect, state: &EmojiPickerState, catalog: &Ico
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::ACCENT))
         .title(Span::styled(
-            " Glyph Picker ",
+            " glyph picker ",
             Style::default()
                 .fg(theme::HIGHLIGHT)
                 .add_modifier(Modifier::BOLD),
         ))
         .title(
             Line::from(vec![
-                Span::styled("Esc", Style::default().fg(theme::ACCENT)),
+                Span::styled("esc", Style::default().fg(theme::ACCENT)),
                 Span::raw(" "),
-                Span::styled("Cancel ", Style::default().fg(theme::MUTED)),
+                Span::styled("cancel ", Style::default().fg(theme::MUTED)),
             ])
             .right_aligned(),
         );
@@ -113,17 +113,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &EmojiPickerState, catalog: &Ico
         f,
         layout[3],
         &[
-            ("Tab", "Switch Set"),
-            ("\u{23CE}", "Insert"),
-            ("Alt+\u{23CE}", "Insert (keep open)"),
+            ("tab", "switch set"),
+            ("\u{23CE}", "insert"),
+            ("alt+\u{23CE}", "insert (keep open)"),
         ],
     );
 }
 
 pub const TAB_LABELS: &[(&str, IconPickerTab)] = &[
-    ("Emoji", IconPickerTab::Emoji),
-    ("Unicode", IconPickerTab::Unicode),
-    ("Nerd Font", IconPickerTab::NerdFont),
+    ("emoji", IconPickerTab::Emoji),
+    ("unicode", IconPickerTab::Unicode),
+    ("nerd font", IconPickerTab::NerdFont),
 ];
 
 const TAB_STRIP_LEAD: u16 = 1;
@@ -183,7 +183,7 @@ fn render_tabs(f: &mut Frame, area: Rect, state: &EmojiPickerState) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::MUTED))
         .title(Span::styled(
-            " Glyph Set ",
+            " glyph set ",
             Style::default().fg(theme::MUTED),
         ));
 
@@ -201,7 +201,7 @@ fn render_search(f: &mut Frame, area: Rect, state: &EmojiPickerState) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::ACCENT))
         .title(Span::styled(
-            " Search ",
+            " search ",
             Style::default().fg(theme::HIGHLIGHT),
         ));
 
@@ -245,7 +245,7 @@ fn render_icon_list(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::MUTED))
-        .title(Span::styled(" Glyphs ", Style::default().fg(theme::MUTED)));
+        .title(Span::styled(" glyphs ", Style::default().fg(theme::MUTED)));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -301,7 +301,7 @@ fn render_icon_list(
     if total_flat > 0 {
         let total_pages = total_flat.div_ceil(visible_height);
         let current_page = scroll / visible_height + 1;
-        let counter = format!(" Page {}/{} ", current_page, total_pages);
+        let counter = format!(" page {}/{} ", current_page, total_pages);
         let counter_width = counter.len() as u16;
         let counter_area = Rect {
             x: area.x + area.width.saturating_sub(counter_width + 1),
@@ -378,7 +378,7 @@ fn render_keymap(f: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::MUTED))
-        .title(Span::styled(" Keymap ", Style::default().fg(theme::MUTED)));
+        .title(Span::styled(" keymap ", Style::default().fg(theme::MUTED)));
 
     let para = Paragraph::new(Line::from(spans)).block(block);
     f.render_widget(para, area);
