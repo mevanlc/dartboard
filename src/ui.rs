@@ -221,7 +221,6 @@ fn render_swatch_strip(frame: &mut Frame, canvas_area: Rect, app: &mut App) {
         let (body_rect, pin_rect) = render_swatch_box(
             frame.buffer_mut(),
             rect,
-            idx,
             swatch,
             is_active,
             is_transparent,
@@ -234,7 +233,6 @@ fn render_swatch_strip(frame: &mut Frame, canvas_area: Rect, app: &mut App) {
 fn render_swatch_box(
     buf: &mut Buffer,
     rect: Rect,
-    idx: usize,
     swatch: Option<&Swatch>,
     is_active: bool,
     is_transparent: bool,
@@ -287,26 +285,8 @@ fn render_swatch_box(
         render_swatch_preview(buf, inner, &swatch.clipboard);
     }
 
-    let digit = char::from_digit(idx as u32 + 1, 10).unwrap_or('?');
-    let digit_col = right_col - 1;
-    let digit_row = inner.y;
-    let digit_style = if swatch.is_some() {
-        Style::default()
-            .fg(theme::HIGHLIGHT)
-            .bg(theme::OOB_BG)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(theme::MUTED_GREATER)
-            .bg(theme::OOB_BG)
-    };
-    buf[(digit_col, digit_row)]
-        .set_char(digit)
-        .set_style(digit_style);
-
     if is_transparent {
-        let marker_col = right_col - 2;
-        buf[(marker_col, digit_row)]
+        buf[(right_col - 1, inner.y)]
             .set_char('◌')
             .set_style(Style::default().fg(theme::HIGHLIGHT).bg(theme::OOB_BG));
     }
