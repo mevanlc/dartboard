@@ -38,6 +38,7 @@ pub struct IconCatalogData {
     emoji_all: Vec<IconEntry>,
     nerd_common: Vec<IconEntry>,
     nerd_all: Vec<IconEntry>,
+    unicode_box: Vec<IconEntry>,
     unicode_common: Vec<IconEntry>,
     unicode_all: Vec<IconEntry>,
 }
@@ -83,6 +84,7 @@ impl IconCatalogData {
         let emoji_all = build_emoji_all();
         let nerd_all_raw = nerd_fonts::load();
         let (nerd_common, nerd_all) = build_nerd_sections(&nerd_all_raw);
+        let unicode_box = build_unicode_box_drawing();
         let unicode_common = build_unicode_common();
         let unicode_all = build_unicode_all();
 
@@ -91,6 +93,7 @@ impl IconCatalogData {
             emoji_all,
             nerd_common,
             nerd_all,
+            unicode_box,
             unicode_common,
             unicode_all,
         }
@@ -100,24 +103,25 @@ impl IconCatalogData {
         let query_lower = query.to_lowercase();
         match tab {
             IconPickerTab::Emoji => filter_two_sections(
-                "Common Emoji",
+                "common emoji",
                 &self.emoji_common,
-                "All Emoji",
+                "all emoji",
                 &self.emoji_all,
                 &query_lower,
             ),
             IconPickerTab::NerdFont => filter_two_sections(
-                "Common",
+                "common",
                 &self.nerd_common,
-                "All Nerd Font",
+                "all nerd font",
                 &self.nerd_all,
                 &query_lower,
             ),
-            IconPickerTab::Unicode => filter_two_sections(
-                "Common",
-                &self.unicode_common,
-                "All Unicode",
-                &self.unicode_all,
+            IconPickerTab::Unicode => filter_sections(
+                &[
+                    ("box drawing", self.unicode_box.as_slice()),
+                    ("common", self.unicode_common.as_slice()),
+                    ("all unicode", self.unicode_all.as_slice()),
+                ],
                 &query_lower,
             ),
         }
@@ -181,10 +185,30 @@ fn build_nerd_sections(all: &[nerd_fonts::NerdFontGlyph]) -> (Vec<IconEntry>, Ve
     (common, all_entries)
 }
 
+fn build_unicode_box_drawing() -> Vec<IconEntry> {
+    // U+2500..=U+257F is the "Box Drawing" Unicode block. Some terminals
+    // also include a few glyphs from the adjacent Block Elements range
+    // (U+2580..=U+259F) for shading/partial blocks that are commonly used
+    // alongside the box drawing chars.
+    let mut entries = Vec::new();
+    for code in 0x2500u32..=0x259F {
+        if let Some(ch) = char::from_u32(code) {
+            if let Some(name) = unicode_names2::name(ch) {
+                let name_str = name.to_string();
+                if name_str.starts_with('<') {
+                    continue;
+                }
+                entries.push(make_entry(ch.to_string(), name_str.to_lowercase()));
+            }
+        }
+    }
+    entries
+}
+
 fn build_unicode_common() -> Vec<IconEntry> {
     COMMON_UNICODE
         .iter()
-        .map(|(icon, name)| make_entry(icon.to_string(), name.to_string()))
+        .map(|(icon, name)| make_entry(icon.to_string(), name.to_lowercase()))
         .collect()
 }
 
@@ -200,7 +224,7 @@ fn build_unicode_all() -> Vec<IconEntry> {
                 if name_str.starts_with('<') {
                     continue;
                 }
-                entries.push(make_entry(ch.to_string(), name_str));
+                entries.push(make_entry(ch.to_string(), name_str.to_lowercase()));
             }
         }
     }
@@ -214,42 +238,36 @@ fn filter_two_sections<'a>(
     all: &'a [IconEntry],
     query: &str,
 ) -> Vec<SectionView<'a>> {
-    let mut sections = Vec::new();
-    if query.is_empty() {
-        if !common.is_empty() {
-            sections.push(SectionView {
-                title: common_title,
-                entries: SectionEntries::Full(common),
-            });
-        }
-        if !all.is_empty() {
-            sections.push(SectionView {
-                title: all_title,
-                entries: SectionEntries::Full(all),
-            });
-        }
-    } else {
-        let filtered_common: Vec<&IconEntry> = common
-            .iter()
-            .filter(|e| e.name_lower.contains(query))
-            .collect();
-        let filtered_all: Vec<&IconEntry> = all
-            .iter()
-            .filter(|e| e.name_lower.contains(query))
-            .collect();
+    filter_sections(&[(common_title, common), (all_title, all)], query)
+}
 
-        if !filtered_common.is_empty() {
-            sections.push(SectionView {
-                title: common_title,
-                entries: SectionEntries::Filtered(filtered_common),
+fn filter_sections<'a>(
+    sections: &[(&'static str, &'a [IconEntry])],
+    query: &str,
+) -> Vec<SectionView<'a>> {
+    let mut out = Vec::new();
+    for (title, source) in sections {
+        if query.is_empty() {
+            if source.is_empty() {
+                continue;
+            }
+            out.push(SectionView {
+                title,
+                entries: SectionEntries::Full(source),
             });
-        }
-        if !filtered_all.is_empty() {
-            sections.push(SectionView {
-                title: all_title,
-                entries: SectionEntries::Filtered(filtered_all),
+        } else {
+            let filtered: Vec<&IconEntry> = source
+                .iter()
+                .filter(|e| e.name_lower.contains(query))
+                .collect();
+            if filtered.is_empty() {
+                continue;
+            }
+            out.push(SectionView {
+                title,
+                entries: SectionEntries::Filtered(filtered),
             });
         }
     }
-    sections
+    out
 }

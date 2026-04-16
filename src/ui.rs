@@ -116,16 +116,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let title = if let Some(ref floating) = app.floating {
         if floating.transparent {
-            " dartboard \u{00b7} lifted (see-thru) \u{00b7} esc to cancel ".to_string()
+            " lifted (see-thru) \u{00b7} esc to cancel ".to_string()
         } else {
-            " dartboard \u{00b7} lifted \u{00b7} esc to cancel ".to_string()
+            " lifted \u{00b7} esc to cancel ".to_string()
         }
     } else {
         format!(
-            " dartboard \u{00b7} {} for help \u{00b7} {} glyphs \u{00b7} {} quit ",
+            " {} help \u{00b7} {} glyphs \u{00b7} {} quit ",
             "^P", "^]", "^Q"
         )
     };
+    let title_cols = display_width(&title) as u16;
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -134,7 +135,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let canvas_area = outer.inner(area);
     frame.render_widget(outer, area);
-    render_pan_indicators(frame.buffer_mut(), area, app);
+    render_pan_indicators(frame.buffer_mut(), area, app, title_cols);
 
     app.set_viewport(canvas_area);
 
@@ -399,7 +400,7 @@ fn cell_is_visible(cell: Option<CellValue>) -> bool {
     }
 }
 
-fn render_pan_indicators(buf: &mut Buffer, area: Rect, app: &App) {
+fn render_pan_indicators(buf: &mut Buffer, area: Rect, app: &App, title_cols: u16) {
     if area.width < 3 || area.height < 3 {
         return;
     }
@@ -428,7 +429,12 @@ fn render_pan_indicators(buf: &mut Buffer, area: Rect, app: &App) {
         }
     }
 
-    if can_pan_up && area.width >= 5 {
+    // Top indicator sits at [mid_x - 1, mid_x + 1] on the top border row.
+    // The title is painted starting at col area.x + 1. Hide the indicator
+    // when the title would overlap it rather than let them fight for cells.
+    let title_right_col = area.x.saturating_add(title_cols);
+    let top_indicator_fits = title_right_col + 1 < mid_x;
+    if can_pan_up && area.width >= 5 && top_indicator_fits {
         for (offset, ch) in [(-1_i32, '▴'), (0, '▲'), (1, '▴')] {
             let x = (mid_x as i32 + offset) as u16;
             buf[(x, area.y)].set_char(ch).set_style(indicator_style);
