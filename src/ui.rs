@@ -112,23 +112,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let title = if let Some(ref floating) = app.floating {
         if floating.transparent {
-            format!(
-                " dartboard \u{00b7} {} \u{00b7} lifted (see-thru) \u{00b7} Esc to cancel ",
-                app.active_user_name()
-            )
+            " lifted (see-thru) \u{00b7} Esc to cancel ".to_string()
         } else {
-            format!(
-                " dartboard \u{00b7} {} \u{00b7} lifted \u{00b7} Esc to cancel ",
-                app.active_user_name()
-            )
+            " lifted \u{00b7} Esc to cancel ".to_string()
         }
     } else {
         format!(
-            " dartboard \u{00b7} {} \u{00b7} Tab switch user \u{00b7} {} help \u{00b7} {} glyphs \u{00b7} {} quit ",
-            app.active_user_name(),
-            "^P",
-            "^]",
-            "^Q"
+            " {} help \u{00b7} {} glyphs \u{00b7} {} quit ",
+            "^P", "^]", "^Q"
         )
     };
     let title_cols = display_width(&title) as u16;
@@ -223,13 +214,8 @@ fn render_swatch_strip(frame: &mut Frame, canvas_area: Rect, app: &mut App) {
                 .map(|floating| floating.transparent)
                 .unwrap_or(false);
 
-        let (body_rect, pin_rect) = render_swatch_box(
-            frame.buffer_mut(),
-            rect,
-            swatch,
-            is_active,
-            is_transparent,
-        );
+        let (body_rect, pin_rect) =
+            render_swatch_box(frame.buffer_mut(), rect, swatch, is_active, is_transparent);
         app.swatch_body_hits[idx] = Some(body_rect);
         app.swatch_pin_hits[idx] = pin_rect;
     }

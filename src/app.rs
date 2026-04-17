@@ -337,10 +337,6 @@ impl App {
         self.active_user_idx
     }
 
-    pub fn active_user_name(&self) -> &str {
-        &self.users[self.active_user_idx].name
-    }
-
     pub fn active_user_color(&self) -> Color {
         self.users[self.active_user_idx].color
     }
