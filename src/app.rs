@@ -4,10 +4,13 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::{clipboard::CopyToClipboard, execute};
+use rand::seq::SliceRandom;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 use crate::canvas::{Canvas, CellValue, Pos};
 use crate::emoji;
+use crate::theme;
 
 const UNDO_DEPTH_CAP: usize = 500;
 pub const SWATCH_CAPACITY: usize = 5;
@@ -186,6 +189,7 @@ impl Default for UserSession {
 #[derive(Debug, Clone)]
 pub struct LocalUser {
     pub name: String,
+    pub color: Color,
     session: UserSession,
 }
 
@@ -220,11 +224,17 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let default_session = UserSession::default();
+        let mut used_colors = Vec::with_capacity(LOCAL_USER_NAMES.len());
         let users = LOCAL_USER_NAMES
             .iter()
-            .map(|name| LocalUser {
-                name: (*name).to_string(),
-                session: default_session.clone(),
+            .map(|name| {
+                let color = random_available_user_color(&used_colors);
+                used_colors.push(color);
+                LocalUser {
+                    name: (*name).to_string(),
+                    color,
+                    session: default_session.clone(),
+                }
             })
             .collect();
         let current_session = default_session;
@@ -329,6 +339,10 @@ impl App {
 
     pub fn active_user_name(&self) -> &str {
         &self.users[self.active_user_idx].name
+    }
+
+    pub fn active_user_color(&self) -> Color {
+        self.users[self.active_user_idx].color
     }
 
     fn apply_canvas_edit(&mut self, edit: impl FnOnce(&mut Canvas)) {
@@ -581,7 +595,7 @@ impl App {
             .normalized_for_canvas(&self.canvas)
     }
 
-    fn fill_bounds_on(canvas: &mut Canvas, bounds: Bounds, ch: char) {
+    fn fill_bounds_on(canvas: &mut Canvas, bounds: Bounds, ch: char, fg: Color) {
         for y in bounds.min_y..=bounds.max_y {
             let mut x = bounds.min_x;
             while x <= bounds.max_x {
@@ -595,7 +609,7 @@ impl App {
                 if width == 2 && x == bounds.max_x {
                     break;
                 }
-                let _ = canvas.put_glyph(Pos { x, y }, ch);
+                let _ = canvas.put_glyph_colored(Pos { x, y }, ch, fg);
                 x += width;
             }
         }
@@ -659,7 +673,8 @@ impl App {
             .selection_or_cursor_bounds()
             .normalized_for_canvas(&self.canvas);
         self.push_swatch(self.capture_bounds(bounds));
-        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ' '));
+        let color = self.active_user_color();
+        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ' ', color));
     }
 
     fn push_swatch(&mut self, clipboard: Clipboard) {
@@ -739,6 +754,7 @@ impl App {
         let pos = self.cursor;
         let transparent = floating.transparent;
         let clipboard = floating.clipboard.clone();
+        let color = self.active_user_color();
         self.apply_canvas_edit(|canvas| {
             for y in 0..clipboard.height {
                 for x in 0..clipboard.width {
@@ -753,7 +769,7 @@ impl App {
                     };
                     match clipboard.get(x, y) {
                         Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                            let _ = canvas.put_glyph(target, ch);
+                            let _ = canvas.put_glyph_colored(target, ch, color);
                         }
                         Some(CellValue::WideCont) => {}
                         None if !transparent => canvas.clear(target),
@@ -772,6 +788,7 @@ impl App {
         {
             let pos = self.cursor;
             let cb = &floating.clipboard;
+            let color = self.active_user_color();
             for y in 0..cb.height {
                 for x in 0..cb.width {
                     let tx = pos.x + x;
@@ -780,7 +797,7 @@ impl App {
                         let target = Pos { x: tx, y: ty };
                         match cb.get(x, y) {
                             Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                                let _ = self.canvas.put_glyph(target, ch);
+                                let _ = self.canvas.put_glyph_colored(target, ch, color);
                             }
                             Some(CellValue::WideCont) => {}
                             None if !floating.transparent => self.canvas.clear(target),
@@ -958,6 +975,7 @@ impl App {
         };
 
         let cursor = self.cursor;
+        let color = self.active_user_color();
         self.apply_canvas_edit(|canvas| {
             for y in 0..clipboard.height {
                 for x in 0..clipboard.width {
@@ -972,7 +990,7 @@ impl App {
                     };
                     match clipboard.get(x, y) {
                         Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                            let _ = canvas.put_glyph(target, ch);
+                            let _ = canvas.put_glyph_colored(target, ch, color);
                         }
                         Some(CellValue::WideCont) => {}
                         None => canvas.clear(target),
@@ -991,7 +1009,8 @@ impl App {
         } else {
             '*'
         };
-        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ch));
+        let color = self.active_user_color();
+        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ch, color));
     }
 
     fn draw_border(&mut self) {
@@ -999,97 +1018,107 @@ impl App {
             return;
         };
 
+        let color = self.active_user_color();
         self.apply_canvas_edit(|canvas| {
             if bounds.width() == 1 && bounds.height() == 1 {
-                canvas.set(
+                canvas.set_colored(
                     Pos {
                         x: bounds.min_x,
                         y: bounds.min_y,
                     },
                     '*',
+                    color,
                 );
                 return;
             }
 
             if bounds.height() == 1 {
-                canvas.set(
+                canvas.set_colored(
                     Pos {
                         x: bounds.min_x,
                         y: bounds.min_y,
                     },
                     '.',
+                    color,
                 );
                 for x in (bounds.min_x + 1)..bounds.max_x {
-                    canvas.set(Pos { x, y: bounds.min_y }, '-');
+                    canvas.set_colored(Pos { x, y: bounds.min_y }, '-', color);
                 }
-                canvas.set(
+                canvas.set_colored(
                     Pos {
                         x: bounds.max_x,
                         y: bounds.min_y,
                     },
                     '.',
+                    color,
                 );
                 return;
             }
 
             if bounds.width() == 1 {
-                canvas.set(
+                canvas.set_colored(
                     Pos {
                         x: bounds.min_x,
                         y: bounds.min_y,
                     },
                     '.',
+                    color,
                 );
                 for y in (bounds.min_y + 1)..bounds.max_y {
-                    canvas.set(Pos { x: bounds.min_x, y }, '|');
+                    canvas.set_colored(Pos { x: bounds.min_x, y }, '|', color);
                 }
-                canvas.set(
+                canvas.set_colored(
                     Pos {
                         x: bounds.min_x,
                         y: bounds.max_y,
                     },
                     '`',
+                    color,
                 );
                 return;
             }
 
-            canvas.set(
+            canvas.set_colored(
                 Pos {
                     x: bounds.min_x,
                     y: bounds.min_y,
                 },
                 '.',
+                color,
             );
-            canvas.set(
+            canvas.set_colored(
                 Pos {
                     x: bounds.max_x,
                     y: bounds.min_y,
                 },
                 '.',
+                color,
             );
-            canvas.set(
+            canvas.set_colored(
                 Pos {
                     x: bounds.min_x,
                     y: bounds.max_y,
                 },
                 '`',
+                color,
             );
-            canvas.set(
+            canvas.set_colored(
                 Pos {
                     x: bounds.max_x,
                     y: bounds.max_y,
                 },
                 '\'',
+                color,
             );
 
             for x in (bounds.min_x + 1)..bounds.max_x {
-                canvas.set(Pos { x, y: bounds.min_y }, '-');
-                canvas.set(Pos { x, y: bounds.max_y }, '-');
+                canvas.set_colored(Pos { x, y: bounds.min_y }, '-', color);
+                canvas.set_colored(Pos { x, y: bounds.max_y }, '-', color);
             }
 
             for y in (bounds.min_y + 1)..bounds.max_y {
-                canvas.set(Pos { x: bounds.min_x, y }, '|');
-                canvas.set(Pos { x: bounds.max_x, y }, '|');
+                canvas.set_colored(Pos { x: bounds.min_x, y }, '|', color);
+                canvas.set_colored(Pos { x: bounds.max_x, y }, '|', color);
             }
         });
     }
@@ -1098,14 +1127,16 @@ impl App {
         let bounds = self
             .selection_or_cursor_bounds()
             .normalized_for_canvas(&self.canvas);
-        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ch));
+        let color = self.active_user_color();
+        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ch, color));
     }
 
     fn insert_char(&mut self, ch: char) {
         let cursor = self.cursor;
         let width = Canvas::display_width(ch);
+        let color = self.active_user_color();
         self.apply_canvas_edit(|canvas| {
-            let _ = canvas.put_glyph(cursor, ch);
+            let _ = canvas.put_glyph_colored(cursor, ch, color);
         });
         for _ in 0..width {
             self.move_right();
@@ -1338,6 +1369,7 @@ impl App {
         }
 
         let origin = self.cursor;
+        let color = self.active_user_color();
         self.apply_canvas_edit(|canvas| {
             let mut x = origin.x;
             let mut y = origin.y;
@@ -1354,7 +1386,7 @@ impl App {
                     }
                     _ => {
                         if x < canvas.width && y < canvas.height {
-                            let _ = canvas.put_glyph(Pos { x, y }, ch);
+                            let _ = canvas.put_glyph_colored(Pos { x, y }, ch, color);
                         }
                         x += Canvas::display_width(ch);
                     }
@@ -1834,6 +1866,26 @@ fn swatch_home_row_index(ch: char) -> Option<usize> {
     }
 }
 
+fn random_available_user_color(used_colors: &[Color]) -> Color {
+    let mut rng = rand::thread_rng();
+    theme::PLAYER_PALETTE
+        .iter()
+        .copied()
+        .filter(|color| !used_colors.contains(color))
+        .collect::<Vec<_>>()
+        .choose(&mut rng)
+        .copied()
+        .or_else(|| {
+            theme::PLAYER_PALETTE
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .choose(&mut rng)
+                .copied()
+        })
+        .unwrap_or(theme::TEXT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{App, Mode, SWATCH_CAPACITY};
@@ -2155,6 +2207,36 @@ mod tests {
     }
 
     #[test]
+    fn local_users_start_with_distinct_colors() {
+        let app = App::new();
+        let colors: Vec<_> = app.users().iter().map(|user| user.color).collect();
+        for (idx, color) in colors.iter().enumerate() {
+            assert!(
+                colors[(idx + 1)..].iter().all(|other| other != color),
+                "duplicate player color at index {idx}: {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn authored_cells_take_the_active_user_color() {
+        let mut app = App::new();
+        let first_color = app.active_user_color();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'A');
+        assert_eq!(app.canvas.fg(Pos { x: 0, y: 0 }), Some(first_color));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        let second_color = app.active_user_color();
+        assert_ne!(second_color, first_color);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE));
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'B');
+        assert_eq!(app.canvas.fg(Pos { x: 0, y: 0 }), Some(second_color));
+    }
+
+    #[test]
     fn keep_open_picker_insert_writes_adjacent_cells() {
         let mut app = App::new();
         app.open_emoji_picker();
@@ -2292,10 +2374,7 @@ mod tests {
             app.copy_selection_or_cell();
         }
 
-        assert_eq!(
-            app.swatches.iter().filter(|s| s.is_some()).count(),
-            5
-        );
+        assert_eq!(app.swatches.iter().filter(|s| s.is_some()).count(), 5);
         // Most recent is at index 0.
         assert_eq!(
             app.swatches[0].as_ref().unwrap().clipboard.get(0, 0),
@@ -2437,10 +2516,7 @@ mod tests {
         app.activate_swatch(0);
 
         assert!(app.floating.is_some());
-        assert_eq!(
-            app.floating.as_ref().unwrap().source_index,
-            Some(0)
-        );
+        assert_eq!(app.floating.as_ref().unwrap().source_index, Some(0));
         assert!(!app.mode.is_selecting());
         assert_eq!(app.canvas.get(Pos { x: 1, y: 1 }), 'A');
     }
@@ -2478,10 +2554,7 @@ mod tests {
         assert!(app.floating.as_ref().unwrap().transparent);
 
         app.activate_swatch(1); // switch: should be opaque again
-        assert_eq!(
-            app.floating.as_ref().unwrap().source_index,
-            Some(1)
-        );
+        assert_eq!(app.floating.as_ref().unwrap().source_index, Some(1));
         assert!(!app.floating.as_ref().unwrap().transparent);
     }
 

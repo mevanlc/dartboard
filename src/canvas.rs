@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use ratatui::style::Color;
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,11 +24,13 @@ pub struct Glyph {
     pub pos: Pos,
     pub ch: char,
     pub width: usize,
+    pub fg: Option<Color>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Canvas {
     cells: HashMap<Pos, CellValue>,
+    colors: HashMap<Pos, Color>,
     pub width: usize,
     pub height: usize,
 }
@@ -36,6 +39,7 @@ impl Canvas {
     pub fn new() -> Self {
         Self {
             cells: HashMap::new(),
+            colors: HashMap::new(),
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
         }
@@ -47,6 +51,11 @@ impl Canvas {
 
     pub fn cell(&self, pos: Pos) -> Option<CellValue> {
         self.cells.get(&pos).copied()
+    }
+
+    pub fn fg(&self, pos: Pos) -> Option<Color> {
+        let origin = self.glyph_origin(pos)?;
+        self.colors.get(&origin).copied()
     }
 
     pub fn is_continuation(&self, pos: Pos) -> bool {
@@ -72,11 +81,13 @@ impl Canvas {
                 pos: origin,
                 ch,
                 width: 1,
+                fg: self.colors.get(&origin).copied(),
             }),
             CellValue::Wide(ch) => Some(Glyph {
                 pos: origin,
                 ch,
                 width: 2,
+                fg: self.colors.get(&origin).copied(),
             }),
             CellValue::WideCont => None,
         }
@@ -86,6 +97,7 @@ impl Canvas {
         match self.cell(origin) {
             Some(CellValue::Narrow(_)) => {
                 self.cells.remove(&origin);
+                self.colors.remove(&origin);
             }
             Some(CellValue::Wide(_)) => {
                 self.cells.remove(&origin);
@@ -93,6 +105,7 @@ impl Canvas {
                     x: origin.x + 1,
                     y: origin.y,
                 });
+                self.colors.remove(&origin);
             }
             _ => {}
         }
@@ -104,7 +117,16 @@ impl Canvas {
         }
     }
 
+    #[allow(dead_code)]
     pub fn put_glyph(&mut self, pos: Pos, ch: char) -> bool {
+        self.put_glyph_with_optional_color(pos, ch, None)
+    }
+
+    pub fn put_glyph_colored(&mut self, pos: Pos, ch: char, fg: Color) -> bool {
+        self.put_glyph_with_optional_color(pos, ch, Some(fg))
+    }
+
+    fn put_glyph_with_optional_color(&mut self, pos: Pos, ch: char, fg: Option<Color>) -> bool {
         if pos.x >= self.width || pos.y >= self.height {
             return false;
         }
@@ -143,11 +165,21 @@ impl Canvas {
                 CellValue::WideCont,
             );
         }
+        if let Some(color) = fg {
+            self.colors.insert(pos, color);
+        } else {
+            self.colors.remove(&pos);
+        }
         true
     }
 
+    #[allow(dead_code)]
     pub fn set(&mut self, pos: Pos, ch: char) {
         let _ = self.put_glyph(pos, ch);
+    }
+
+    pub fn set_colored(&mut self, pos: Pos, ch: char, fg: Color) {
+        let _ = self.put_glyph_colored(pos, ch, fg);
     }
 
     pub fn clear(&mut self, pos: Pos) {
@@ -176,11 +208,13 @@ impl Canvas {
                     pos: *pos,
                     ch: *ch,
                     width: 1,
+                    fg: self.colors.get(pos).copied(),
                 }),
                 CellValue::Wide(ch) => Some(Glyph {
                     pos: *pos,
                     ch: *ch,
                     width: 2,
+                    fg: self.colors.get(pos).copied(),
                 }),
                 CellValue::WideCont => None,
             })
@@ -198,9 +232,10 @@ impl Canvas {
 
     fn rebuild_from_glyphs(&mut self, glyphs: Vec<Glyph>) {
         self.cells.clear();
+        self.colors.clear();
         for glyph in glyphs {
             if self.can_place_glyph(&glyph) {
-                let _ = self.put_glyph(glyph.pos, glyph.ch);
+                let _ = self.put_glyph_with_optional_color(glyph.pos, glyph.ch, glyph.fg);
             }
         }
     }
@@ -309,6 +344,7 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::{Canvas, CellValue, Pos};
+    use ratatui::style::Color;
 
     #[test]
     fn row_push_and_pull_are_directional() {
@@ -370,5 +406,28 @@ mod tests {
 
         assert_eq!(canvas.get(Pos { x: 1, y: 1 }), ' ');
         assert_eq!(canvas.get(Pos { x: 2, y: 1 }), ' ');
+    }
+
+    #[test]
+    fn colored_glyph_exposes_foreground_on_origin_and_continuation() {
+        let mut canvas = Canvas::new();
+        let color = Color::Rgb(84, 196, 255);
+
+        canvas.set_colored(Pos { x: 3, y: 2 }, '🌱', color);
+
+        assert_eq!(canvas.fg(Pos { x: 3, y: 2 }), Some(color));
+        assert_eq!(canvas.fg(Pos { x: 4, y: 2 }), Some(color));
+    }
+
+    #[test]
+    fn directional_push_preserves_glyph_color() {
+        let mut canvas = Canvas::new();
+        let color = Color::Rgb(192, 132, 255);
+
+        canvas.set_colored(Pos { x: 1, y: 0 }, 'A', color);
+        canvas.push_left(0, 1);
+
+        assert_eq!(canvas.get(Pos { x: 0, y: 0 }), 'A');
+        assert_eq!(canvas.fg(Pos { x: 0, y: 0 }), Some(color));
     }
 }

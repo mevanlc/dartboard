@@ -9,3 +9,13 @@ pub const SELECTION_BG: Color = Color::Rgb(64, 40, 24);
 pub const HIGHLIGHT: Color = Color::Rgb(208, 166, 89);
 pub const OOB_BG: Color = Color::Rgb(16, 16, 16);
 pub const FLOAT_BG: Color = Color::Rgb(32, 48, 64);
+pub const PLAYER_PALETTE: [Color; 8] = [
+    Color::Rgb(255, 110, 64),
+    Color::Rgb(255, 196, 64),
+    Color::Rgb(145, 226, 88),
+    Color::Rgb(72, 220, 170),
+    Color::Rgb(84, 196, 255),
+    Color::Rgb(128, 163, 255),
+    Color::Rgb(192, 132, 255),
+    Color::Rgb(255, 124, 196),
+];

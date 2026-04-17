@@ -50,6 +50,7 @@ impl<'a> Widget for CanvasWidget<'a> {
 
                 let pos = Pos { x, y };
                 let cell_value = self.app.canvas.cell(pos);
+                let glyph_fg = self.app.canvas.fg(pos).unwrap_or(theme::TEXT);
 
                 if has_selection && self.app.is_selected(pos) {
                     cell.set_bg(theme::SELECTION_BG).set_fg(theme::HIGHLIGHT);
@@ -57,7 +58,7 @@ impl<'a> Widget for CanvasWidget<'a> {
                         cell.set_char(ch);
                     }
                 } else if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
-                    cell.set_char(ch).set_fg(theme::TEXT);
+                    cell.set_char(ch).set_fg(glyph_fg);
                 }
             }
         }
@@ -66,6 +67,7 @@ impl<'a> Widget for CanvasWidget<'a> {
             let cb = &floating.clipboard;
             let fx = self.app.cursor.x;
             let fy = self.app.cursor.y;
+            let active_color = self.app.active_user_color();
 
             for cy in 0..cb.height {
                 for cx in 0..cb.width {
@@ -88,7 +90,7 @@ impl<'a> Widget for CanvasWidget<'a> {
                         Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
                             cell.set_char(ch)
                                 .set_bg(theme::FLOAT_BG)
-                                .set_fg(theme::TEXT);
+                                .set_fg(active_color);
                         }
                         Some(CellValue::WideCont) => {
                             cell.set_bg(theme::FLOAT_BG);
@@ -206,8 +208,7 @@ fn render_swatch_strip(frame: &mut Frame, canvas_area: Rect, app: &mut App) {
         if (idx as u16) >= n_visible {
             continue;
         }
-        let offset_from_right =
-            (n_visible - 1 - idx as u16) * (SWATCH_BOX_WIDTH + SWATCH_GAP);
+        let offset_from_right = (n_visible - 1 - idx as u16) * (SWATCH_BOX_WIDTH + SWATCH_GAP);
         let box_x = strip_right - offset_from_right - SWATCH_BOX_WIDTH;
         let rect = Rect::new(box_x, box_y, SWATCH_BOX_WIDTH, SWATCH_BOX_HEIGHT);
 
@@ -308,7 +309,9 @@ fn render_swatch_box(
         } else {
             theme::MUTED
         });
-        buf[(pin_col, pin_row)].set_char(pin_char).set_style(pin_style);
+        buf[(pin_col, pin_row)]
+            .set_char(pin_char)
+            .set_style(pin_style);
         buf[(pin_col + 1, pin_row)]
             .set_char(' ')
             .set_style(pin_style);
@@ -511,21 +514,25 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
                 let label = truncate_label(&user.name, max_name_width.saturating_sub(2));
                 let line = format!(
                     "{} {}",
-                    if idx == app.active_user_index() { '▸' } else { ' ' },
+                    if idx == app.active_user_index() {
+                        '▸'
+                    } else {
+                        ' '
+                    },
                     label
                 );
                 if idx == app.active_user_index() {
                     Line::from(Span::styled(
                         format!("{:<width$}", line, width = max_name_width),
                         Style::default()
-                            .fg(theme::HIGHLIGHT)
+                            .fg(user.color)
                             .bg(theme::SELECTION_BG)
                             .add_modifier(Modifier::BOLD),
                     ))
                 } else {
                     Line::from(Span::styled(
                         format!("{:<width$}", line, width = max_name_width),
-                        Style::default().fg(theme::TEXT),
+                        Style::default().fg(user.color),
                     ))
                 }
             })
@@ -635,9 +642,7 @@ fn help_styles() -> (Style, Style, Style, Style) {
 fn render_help_common(frame: &mut Frame, area: Rect) {
     let (heading, sep, key, desc) = help_styles();
     let col_width = area.width.saturating_sub(HELP_SEPARATOR_COLS) / 2;
-    let right_col_width = area
-        .width
-        .saturating_sub(col_width + HELP_SEPARATOR_COLS);
+    let right_col_width = area.width.saturating_sub(col_width + HELP_SEPARATOR_COLS);
 
     let drawing: Vec<(&str, &str)> = vec![
         ("<type>", "draw character"),
@@ -726,9 +731,7 @@ fn render_help_common(frame: &mut Frame, area: Rect) {
 fn render_help_advanced(frame: &mut Frame, area: Rect) {
     let (heading, sep, key, desc) = help_styles();
     let col_width = area.width.saturating_sub(HELP_SEPARATOR_COLS) / 2;
-    let right_col_width = area
-        .width
-        .saturating_sub(col_width + HELP_SEPARATOR_COLS);
+    let right_col_width = area.width.saturating_sub(col_width + HELP_SEPARATOR_COLS);
 
     let transform: Vec<(&str, &str)> = vec![
         ("^H ^J ^K ^L", "push left/down/up/right"),
@@ -796,10 +799,7 @@ fn help_entry_line_with_key_width(
     let desc_label = truncate_display(d, desc_width);
     let desc_padded = pad_right_display(&desc_label, desc_width);
 
-    Line::from(vec![
-        Span::styled(left, ks),
-        Span::styled(desc_padded, ds),
-    ])
+    Line::from(vec![Span::styled(left, ks), Span::styled(desc_padded, ds)])
 }
 
 fn blank_line(width: usize) -> Line<'static> {
