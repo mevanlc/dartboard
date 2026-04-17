@@ -17,6 +17,13 @@ pub enum SwatchZone {
     Body,
     Pin,
 }
+const LOCAL_USER_NAMES: &[&str] = &[
+    "mevanlc",
+    "mat",
+    "averylongusernamethatgetstruncated",
+    "Hades",
+    "graybeard",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -133,6 +140,55 @@ struct PanDrag {
     origin: Pos,
 }
 
+#[derive(Debug, Clone)]
+struct UserSession {
+    cursor: Pos,
+    mode: Mode,
+    show_help: bool,
+    help_tab: HelpTab,
+    emoji_picker_open: bool,
+    viewport: Rect,
+    viewport_origin: Pos,
+    selection_anchor: Option<Pos>,
+    drag_origin: Option<Pos>,
+    pan_drag: Option<PanDrag>,
+    swatches: [Option<Swatch>; SWATCH_CAPACITY],
+    floating: Option<FloatingSelection>,
+    emoji_picker_state: emoji::EmojiPickerState,
+    paint_canvas_before: Option<Canvas>,
+    paint_stroke_anchor: Option<Pos>,
+    paint_stroke_last: Option<Pos>,
+}
+
+impl Default for UserSession {
+    fn default() -> Self {
+        Self {
+            cursor: Pos { x: 0, y: 0 },
+            mode: Mode::Draw,
+            show_help: false,
+            help_tab: HelpTab::default(),
+            emoji_picker_open: false,
+            viewport: Rect::default(),
+            viewport_origin: Pos { x: 0, y: 0 },
+            selection_anchor: None,
+            drag_origin: None,
+            pan_drag: None,
+            swatches: Default::default(),
+            floating: None,
+            emoji_picker_state: emoji::EmojiPickerState::default(),
+            paint_canvas_before: None,
+            paint_stroke_anchor: None,
+            paint_stroke_last: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalUser {
+    pub name: String,
+    session: UserSession,
+}
+
 pub struct App {
     pub canvas: Canvas,
     pub cursor: Pos,
@@ -157,35 +213,122 @@ pub struct App {
     paint_stroke_last: Option<Pos>,
     undo_stack: Vec<Canvas>,
     redo_stack: Vec<Canvas>,
+    users: Vec<LocalUser>,
+    active_user_idx: usize,
 }
 
 impl App {
     pub fn new() -> Self {
+        let default_session = UserSession::default();
+        let users = LOCAL_USER_NAMES
+            .iter()
+            .map(|name| LocalUser {
+                name: (*name).to_string(),
+                session: default_session.clone(),
+            })
+            .collect();
+        let current_session = default_session;
         Self {
             canvas: Canvas::new(),
-            cursor: Pos { x: 0, y: 0 },
-            mode: Mode::Draw,
+            cursor: current_session.cursor,
+            mode: current_session.mode,
             should_quit: false,
-            show_help: false,
-            help_tab: HelpTab::default(),
-            emoji_picker_open: false,
-            viewport: Rect::default(),
-            viewport_origin: Pos { x: 0, y: 0 },
-            selection_anchor: None,
-            drag_origin: None,
-            pan_drag: None,
-            swatches: Default::default(),
-            floating: None,
-            emoji_picker_state: emoji::EmojiPickerState::default(),
+            show_help: current_session.show_help,
+            help_tab: current_session.help_tab,
+            emoji_picker_open: current_session.emoji_picker_open,
+            viewport: current_session.viewport,
+            viewport_origin: current_session.viewport_origin,
+            selection_anchor: current_session.selection_anchor,
+            drag_origin: current_session.drag_origin,
+            pan_drag: current_session.pan_drag,
+            swatches: current_session.swatches,
+            floating: current_session.floating,
+            emoji_picker_state: current_session.emoji_picker_state,
             icon_catalog: None,
             swatch_body_hits: [None; SWATCH_CAPACITY],
             swatch_pin_hits: [None; SWATCH_CAPACITY],
-            paint_canvas_before: None,
-            paint_stroke_anchor: None,
-            paint_stroke_last: None,
+            paint_canvas_before: current_session.paint_canvas_before,
+            paint_stroke_anchor: current_session.paint_stroke_anchor,
+            paint_stroke_last: current_session.paint_stroke_last,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            users,
+            active_user_idx: 0,
         }
+    }
+
+    fn current_session(&self) -> UserSession {
+        UserSession {
+            cursor: self.cursor,
+            mode: self.mode,
+            show_help: self.show_help,
+            help_tab: self.help_tab,
+            emoji_picker_open: self.emoji_picker_open,
+            viewport: self.viewport,
+            viewport_origin: self.viewport_origin,
+            selection_anchor: self.selection_anchor,
+            drag_origin: self.drag_origin,
+            pan_drag: self.pan_drag,
+            swatches: self.swatches.clone(),
+            floating: self.floating.clone(),
+            emoji_picker_state: self.emoji_picker_state.clone(),
+            paint_canvas_before: self.paint_canvas_before.clone(),
+            paint_stroke_anchor: self.paint_stroke_anchor,
+            paint_stroke_last: self.paint_stroke_last,
+        }
+    }
+
+    fn load_session(&mut self, session: UserSession) {
+        self.cursor = session.cursor;
+        self.mode = session.mode;
+        self.show_help = session.show_help;
+        self.help_tab = session.help_tab;
+        self.emoji_picker_open = session.emoji_picker_open;
+        self.viewport = session.viewport;
+        self.viewport_origin = session.viewport_origin;
+        self.selection_anchor = session.selection_anchor;
+        self.drag_origin = session.drag_origin;
+        self.pan_drag = session.pan_drag;
+        self.swatches = session.swatches;
+        self.floating = session.floating;
+        self.emoji_picker_state = session.emoji_picker_state;
+        self.paint_canvas_before = session.paint_canvas_before;
+        self.paint_stroke_anchor = session.paint_stroke_anchor;
+        self.paint_stroke_last = session.paint_stroke_last;
+        self.swatch_body_hits = [None; SWATCH_CAPACITY];
+        self.swatch_pin_hits = [None; SWATCH_CAPACITY];
+    }
+
+    pub(crate) fn sync_active_user_slot(&mut self) {
+        let session = self.current_session();
+        if let Some(user) = self.users.get_mut(self.active_user_idx) {
+            user.session = session;
+        }
+    }
+
+    fn switch_active_user(&mut self, delta: isize) {
+        if self.users.is_empty() {
+            return;
+        }
+
+        self.sync_active_user_slot();
+        let len = self.users.len() as isize;
+        self.active_user_idx = (self.active_user_idx as isize + delta).rem_euclid(len) as usize;
+        let next_session = self.users[self.active_user_idx].session.clone();
+        self.load_session(next_session);
+        self.clamp_cursor();
+    }
+
+    pub fn users(&self) -> &[LocalUser] {
+        &self.users
+    }
+
+    pub fn active_user_index(&self) -> usize {
+        self.active_user_idx
+    }
+
+    pub fn active_user_name(&self) -> &str {
+        &self.users[self.active_user_idx].name
     }
 
     fn apply_canvas_edit(&mut self, edit: impl FnOnce(&mut Canvas)) {
@@ -1401,6 +1544,16 @@ impl App {
                     return;
                 }
 
+                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+                    self.switch_active_user(1);
+                    return;
+                }
+
+                if key.code == KeyCode::BackTab {
+                    self.switch_active_user(-1);
+                    return;
+                }
+
                 if self.show_help {
                     match key.code {
                         KeyCode::Esc | KeyCode::F(1) => self.show_help = false,
@@ -1943,6 +2096,62 @@ mod tests {
         )));
 
         assert!(app.emoji_picker_open);
+    }
+
+    #[test]
+    fn tab_switches_active_local_user() {
+        let mut app = App::new();
+        app.cursor = Pos { x: 7, y: 4 };
+        app.selection_anchor = Some(Pos { x: 3, y: 2 });
+        app.mode = Mode::Select;
+        app.show_help = true;
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        assert_eq!(app.active_user_idx, 1);
+        assert_eq!(app.cursor, Pos { x: 0, y: 0 });
+        assert_eq!(app.selection_anchor, None);
+        assert!(!app.mode.is_selecting());
+        assert!(!app.show_help);
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(app.active_user_idx, 0);
+        assert_eq!(app.cursor, Pos { x: 7, y: 4 });
+        assert_eq!(app.selection_anchor, Some(Pos { x: 3, y: 2 }));
+        assert!(app.mode.is_selecting());
+        assert!(app.show_help);
+    }
+
+    #[test]
+    fn local_users_share_canvas_but_keep_separate_swatch_state() {
+        let mut app = App::new();
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        app.cursor = Pos { x: 5, y: 5 };
+        app.copy_selection_or_cell();
+        assert!(app.swatches[0].is_some());
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        assert_eq!(app.active_user_idx, 1);
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'A');
+        assert!(app.swatches[0].is_none());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE));
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'B');
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(app.active_user_idx, 0);
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'B');
+        assert!(app.swatches[0].is_some());
+        assert_eq!(app.cursor, Pos { x: 5, y: 5 });
     }
 
     #[test]
