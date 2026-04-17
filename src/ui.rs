@@ -11,13 +11,6 @@ use crate::canvas::{CellValue, Pos};
 use crate::emoji;
 use crate::theme;
 
-const PLACEHOLDER_USERS: &[&str] = &[
-    "mevanlc",
-    "mat",
-    "averylongusernamethatgetstruncated",
-    "Hades",
-    "graybeard",
-];
 const USER_LIST_MIN_WIDTH: u16 = 12;
 const USER_LIST_MAX_WIDTH: u16 = 24;
 
@@ -113,17 +106,27 @@ impl<'a> Widget for CanvasWidget<'a> {
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.sync_active_user_slot();
 
     let title = if let Some(ref floating) = app.floating {
         if floating.transparent {
-            " dartboard \u{00b7} lifted (see-thru) \u{00b7} esc to cancel ".to_string()
+            format!(
+                " dartboard \u{00b7} {} \u{00b7} lifted (see-thru) \u{00b7} Esc to cancel ",
+                app.active_user_name()
+            )
         } else {
-            " dartboard \u{00b7} lifted \u{00b7} esc to cancel ".to_string()
+            format!(
+                " dartboard \u{00b7} {} \u{00b7} lifted \u{00b7} Esc to cancel ",
+                app.active_user_name()
+            )
         }
     } else {
         format!(
-            " dartboard \u{00b7} {} for help \u{00b7} {} glyphs \u{00b7} {} quit ",
-            "^P", "^]", "^Q"
+            " dartboard \u{00b7} {} \u{00b7} Tab switch user \u{00b7} {} help \u{00b7} {} glyphs \u{00b7} {} quit ",
+            app.active_user_name(),
+            "^P",
+            "^]",
+            "^Q"
         )
     };
     let outer = Block::default()
@@ -139,7 +142,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.set_viewport(canvas_area);
 
     frame.render_widget(CanvasWidget { app }, canvas_area);
-    let user_list_rect = render_user_list(frame, canvas_area);
+    let user_list_rect = render_user_list(frame, canvas_area, app);
     render_swatch_strip(frame, canvas_area, app);
 
     // Cursor position
@@ -464,20 +467,21 @@ fn render_pan_indicators(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-fn render_user_list(frame: &mut Frame, canvas_area: Rect) -> Option<Rect> {
+fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<Rect> {
     if canvas_area.width < 6 || canvas_area.height < 3 {
         return None;
     }
 
-    let longest_name = PLACEHOLDER_USERS
+    let longest_name = app
+        .users()
         .iter()
-        .map(|name| name.chars().count() as u16)
+        .map(|user| user.name.chars().count() as u16)
         .max()
         .unwrap_or(0);
     let width = (longest_name + 2)
         .clamp(USER_LIST_MIN_WIDTH, USER_LIST_MAX_WIDTH)
         .min(canvas_area.width);
-    let height = (PLACEHOLDER_USERS.len() as u16 + 2).min(canvas_area.height);
+    let height = (app.users().len() as u16 + 2).min(canvas_area.height);
     if width < 4 || height < 3 {
         return None;
     }
@@ -513,10 +517,32 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect) -> Option<Rect> {
 
     let max_name_width = inner.width as usize;
     let text = Text::from(
-        PLACEHOLDER_USERS
+        app.users()
             .iter()
             .take(inner.height as usize)
-            .map(|name| Line::from(truncate_label(name, max_name_width)))
+            .enumerate()
+            .map(|(idx, user)| {
+                let label = truncate_label(&user.name, max_name_width.saturating_sub(2));
+                let line = format!(
+                    "{} {}",
+                    if idx == app.active_user_index() { '▸' } else { ' ' },
+                    label
+                );
+                if idx == app.active_user_index() {
+                    Line::from(Span::styled(
+                        format!("{:<width$}", line, width = max_name_width),
+                        Style::default()
+                            .fg(theme::HIGHLIGHT)
+                            .bg(theme::SELECTION_BG)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(Span::styled(
+                        format!("{:<width$}", line, width = max_name_width),
+                        Style::default().fg(theme::TEXT),
+                    ))
+                }
+            })
             .collect::<Vec<_>>(),
     );
     frame.render_widget(
