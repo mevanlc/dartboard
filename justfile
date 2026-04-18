@@ -35,3 +35,14 @@ run *ARGS:
 # Run the headless server binary, e.g. `just serve 127.0.0.1:8080`.
 serve *ARGS:
     cargo run --bin dartboardd -- {{ARGS}}
+
+# Install every binary in the workspace to ~/.cargo/bin via cargo install.
+# Uses --locked so the resolver honors Cargo.lock.
+install:
+    cargo install --locked --path dartboard
+    cargo install --locked --path dartboard-server
+
+# Remove the installed binaries from ~/.cargo/bin.
+uninstall:
+    cargo uninstall dartboard || true
+    cargo uninstall dartboard-server || true
