@@ -375,6 +375,11 @@ impl App {
     /// Construct an App that talks to a remote dartboard server over ws
     /// instead of an in-proc ServerHandle. There is exactly one local user
     /// (the connected user); peer presence is tracked from server events.
+    ///
+    /// Drains the server until Welcome is received (my_user_id set). This
+    /// avoids a race where the first keystroke submits an op before the
+    /// Welcome snapshot is applied — otherwise Welcome's pre-join empty
+    /// snapshot would stomp the user's first paint.
     pub fn new_remote(client: WebsocketClient, name: String, color: RgbColor) -> Self {
         let default_session = UserSession::default();
         let users = vec![LocalUser {
@@ -383,7 +388,7 @@ impl App {
             session: default_session.clone(),
         }];
         let current_session = default_session;
-        Self {
+        let mut app = Self {
             canvas: Canvas::new(),
             cursor: current_session.cursor,
             mode: current_session.mode,
@@ -416,7 +421,22 @@ impl App {
                 peers: Vec::new(),
                 my_user_id: None,
             },
+        };
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(3);
+        loop {
+            app.drain_server_events();
+            if let Transport::Remote { my_user_id, .. } = &app.transport {
+                if my_user_id.is_some() {
+                    break;
+                }
+            }
+            if start.elapsed() >= timeout {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        app
     }
 
     fn current_session(&self) -> UserSession {
@@ -2872,6 +2892,61 @@ mod tests {
         let snap = server.canvas_snapshot();
         assert_eq!(snap.get(Pos { x: 0, y: 0 }), 'X');
         assert_eq!(snap.get(Pos { x: 1, y: 0 }), 'Y');
+    }
+
+    #[test]
+    fn new_remote_blocks_until_welcome_applied() {
+        // Regression guard for the Welcome race: new_remote must fully drain
+        // Welcome before returning, so the user's first paint isn't
+        // overwritten by an empty snapshot arriving late.
+        use crate::app::Transport;
+        use dartboard_client_ws::{Hello as WsHello, WebsocketClient};
+        use dartboard_core::{CanvasOp, Client};
+        use dartboard_server::{InMemStore, ServerHandle};
+
+        let server = ServerHandle::spawn_local(InMemStore::default());
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        server.bind_ws(addr).unwrap();
+
+        // Pre-seed the server with one cell to prove the snapshot actually
+        // arrives — we expect our mirror to reflect it immediately.
+        let mut seeder = server.connect_local(dartboard_server::Hello {
+            name: "seeder".into(),
+            color: RgbColor::new(1, 1, 1),
+        });
+        seeder.submit_op(CanvasOp::PaintCell {
+            pos: Pos { x: 5, y: 5 },
+            ch: 'Z',
+            fg: RgbColor::new(1, 1, 1),
+        });
+        drop(seeder);
+
+        let url = format!("ws://{}", addr);
+        let client = WebsocketClient::connect(
+            &url,
+            WsHello {
+                name: "me".into(),
+                color: RgbColor::new(255, 0, 0),
+            },
+        )
+        .unwrap();
+
+        let app = App::new_remote(client, "me".into(), RgbColor::new(255, 0, 0));
+        // After new_remote returns, Welcome must have been applied.
+        assert_eq!(
+            app.canvas.get(Pos { x: 5, y: 5 }),
+            'Z',
+            "seeded cell should be visible immediately after new_remote"
+        );
+        match &app.transport {
+            Transport::Remote { my_user_id, .. } => {
+                assert!(my_user_id.is_some(), "my_user_id should be set")
+            }
+            _ => panic!("expected Remote transport"),
+        }
     }
 
     #[test]

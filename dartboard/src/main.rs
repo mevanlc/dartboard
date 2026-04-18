@@ -88,11 +88,20 @@ fn main() -> io::Result<()> {
 }
 
 fn run_listen(addr: SocketAddr) -> io::Result<()> {
+    // If the user passed port 0, resolve it to a concrete port first so the
+    // printed URL is actually usable from --connect.
+    let resolved = if addr.port() == 0 {
+        let listener = std::net::TcpListener::bind(addr)?;
+        let resolved = listener.local_addr()?;
+        drop(listener);
+        resolved
+    } else {
+        addr
+    };
     let server = ServerHandle::spawn_local(InMemStore::default());
-    server.bind_ws(addr)?;
-    eprintln!("dartboard server listening on ws://{}", addr);
+    server.bind_ws(resolved)?;
+    eprintln!("dartboard server listening on ws://{}", resolved);
     eprintln!("press ctrl-c to stop");
-    // bind_ws returned, accept loop is running in a background thread.
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
     }
