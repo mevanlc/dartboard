@@ -161,6 +161,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.show_help {
         render_help(frame, area, app);
+    } else {
+        app.help_tab_hits = [None; 2];
     }
 
     if app.emoji_picker_open {
@@ -532,7 +534,8 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
     Some(panel)
 }
 
-fn render_help(frame: &mut Frame, area: Rect, app: &App) {
+fn render_help(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.help_tab_hits = [None; 2];
     let width = 92u16.min(area.width.saturating_sub(4));
     let height = 24u16.min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
@@ -566,7 +569,8 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let tab_row = Rect::new(inner.x, inner.y, inner.width, 1);
-    render_help_tabs(frame.buffer_mut(), tab_row, app.help_tab);
+    let hits = render_help_tabs(frame.buffer_mut(), tab_row, app.help_tab);
+    app.help_tab_hits = hits;
 
     let content = Rect::new(
         inner.x,
@@ -581,10 +585,15 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) {
+fn render_help_tabs(
+    buf: &mut Buffer,
+    area: Rect,
+    active: HelpTab,
+) -> [Option<(HelpTab, Rect)>; 2] {
     let tabs = [("common", HelpTab::Common), ("advanced", HelpTab::Advanced)];
+    let mut hits: [Option<(HelpTab, Rect)>; 2] = [None; 2];
     let mut x = area.x + 1;
-    for (label, tab) in tabs.iter() {
+    for (i, (label, tab)) in tabs.iter().enumerate() {
         let is_active = *tab == active;
         let indicator = if is_active { "•" } else { " " };
         let cell_style = if is_active {
@@ -595,12 +604,16 @@ fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) {
             Style::default().fg(theme::MUTED)
         };
         let text = format!("[{indicator}] {label}");
+        let start_x = x;
         for ch in text.chars() {
             if x >= area.x + area.width {
                 break;
             }
             buf[(x, area.y)].set_char(ch).set_style(cell_style);
             x += 1;
+        }
+        if x > start_x {
+            hits[i] = Some((*tab, Rect::new(start_x, area.y, x - start_x, 1)));
         }
         // spacing between tabs
         for _ in 0..2 {
@@ -613,6 +626,7 @@ fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) {
             x += 1;
         }
     }
+    hits
 }
 
 fn help_styles() -> (Style, Style, Style, Style) {

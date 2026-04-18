@@ -256,6 +256,7 @@ pub struct App {
     pub icon_catalog: Option<emoji::catalog::IconCatalogData>,
     pub swatch_body_hits: [Option<Rect>; SWATCH_CAPACITY],
     pub swatch_pin_hits: [Option<Rect>; SWATCH_CAPACITY],
+    pub help_tab_hits: [Option<(HelpTab, Rect)>; 2],
     paint_canvas_before: Option<Canvas>,
     paint_stroke_anchor: Option<Pos>,
     paint_stroke_last: Option<Pos>,
@@ -302,6 +303,7 @@ impl App {
             icon_catalog: None,
             swatch_body_hits: [None; SWATCH_CAPACITY],
             swatch_pin_hits: [None; SWATCH_CAPACITY],
+            help_tab_hits: [None; 2],
             paint_canvas_before: current_session.paint_canvas_before,
             paint_stroke_anchor: current_session.paint_stroke_anchor,
             paint_stroke_last: current_session.paint_stroke_last,
@@ -520,6 +522,16 @@ impl App {
             let Some(rect) = maybe_rect else { continue };
             if rect_contains(rect, col, row) {
                 return Some((idx, SwatchZone::Body));
+            }
+        }
+        None
+    }
+
+    fn help_tab_hit(&self, col: u16, row: u16) -> Option<HelpTab> {
+        for maybe in self.help_tab_hits.iter() {
+            let Some((tab, rect)) = maybe else { continue };
+            if rect_contains(rect, col, row) {
+                return Some(*tab);
             }
         }
         None
@@ -1777,16 +1789,6 @@ impl App {
                     return;
                 }
 
-                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
-                    self.switch_active_user(1);
-                    return;
-                }
-
-                if key.code == KeyCode::BackTab {
-                    self.switch_active_user(-1);
-                    return;
-                }
-
                 if self.show_help {
                     match key.code {
                         KeyCode::Esc | KeyCode::F(1) => self.show_help = false,
@@ -1801,6 +1803,16 @@ impl App {
                     return;
                 }
 
+                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+                    self.switch_active_user(1);
+                    return;
+                }
+
+                if key.code == KeyCode::BackTab {
+                    self.switch_active_user(-1);
+                    return;
+                }
+
                 if (key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL))
                     || key.code == KeyCode::F(1)
                 {
@@ -1811,6 +1823,11 @@ impl App {
             }
             Event::Mouse(mouse) => {
                 if self.show_help {
+                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        if let Some(tab) = self.help_tab_hit(mouse.column, mouse.row) {
+                            self.help_tab = tab;
+                        }
+                    }
                     return;
                 }
 
@@ -2092,7 +2109,7 @@ fn random_available_user_color(used_colors: &[Color]) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Mode, SelectionShape, SWATCH_CAPACITY};
+    use super::{App, HelpTab, Mode, SelectionShape, SWATCH_CAPACITY};
     use crate::canvas::{CellValue, Pos};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2360,7 +2377,6 @@ mod tests {
         app.cursor = Pos { x: 7, y: 4 };
         app.selection_anchor = Some(Pos { x: 3, y: 2 });
         app.mode = Mode::Select;
-        app.show_help = true;
 
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
 
@@ -2368,7 +2384,6 @@ mod tests {
         assert_eq!(app.cursor, Pos { x: 0, y: 0 });
         assert_eq!(app.selection_anchor, None);
         assert!(!app.mode.is_selecting());
-        assert!(!app.show_help);
 
         app.handle_event(Event::Key(KeyEvent::new(
             KeyCode::BackTab,
@@ -2379,7 +2394,27 @@ mod tests {
         assert_eq!(app.cursor, Pos { x: 7, y: 4 });
         assert_eq!(app.selection_anchor, Some(Pos { x: 3, y: 2 }));
         assert!(app.mode.is_selecting());
+    }
+
+    #[test]
+    fn tab_cycles_help_tabs_when_help_open() {
+        let mut app = App::new();
+        app.show_help = true;
+        assert_eq!(app.help_tab, HelpTab::Common);
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        assert_eq!(app.help_tab, HelpTab::Advanced);
+        assert_eq!(app.active_user_idx, 0);
         assert!(app.show_help);
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(app.help_tab, HelpTab::Common);
+        assert_eq!(app.active_user_idx, 0);
     }
 
     #[test]
