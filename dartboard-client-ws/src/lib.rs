@@ -32,7 +32,8 @@ pub struct WebsocketClient {
 #[derive(Debug)]
 pub enum ConnectError {
     Io(std::io::Error),
-    Ws(tokio_tungstenite::tungstenite::Error),
+    // Boxed to keep ConnectError small; the underlying type is ~130 bytes.
+    Ws(Box<tokio_tungstenite::tungstenite::Error>),
 }
 
 impl std::fmt::Display for ConnectError {
@@ -54,7 +55,7 @@ impl From<std::io::Error> for ConnectError {
 
 impl From<tokio_tungstenite::tungstenite::Error> for ConnectError {
     fn from(e: tokio_tungstenite::tungstenite::Error) -> Self {
-        Self::Ws(e)
+        Self::Ws(Box::new(e))
     }
 }
 
@@ -109,7 +110,7 @@ async fn run_connection(
     let (ws, _response) = match tokio_tungstenite::connect_async(&url).await {
         Ok(v) => v,
         Err(e) => {
-            let _ = ready_tx.send(Err(ConnectError::Ws(e)));
+            let _ = ready_tx.send(Err(ConnectError::Ws(Box::new(e))));
             return Ok(());
         }
     };
@@ -119,7 +120,7 @@ async fn run_connection(
         name: hello.name,
         color: hello.color,
     })?;
-    write.send(Message::Text(hello_text.into())).await?;
+    write.send(Message::Text(hello_text)).await?;
     let _ = ready_tx.send(Ok(()));
 
     let writer = tokio::spawn(async move {
@@ -127,7 +128,7 @@ async fn run_connection(
             let Ok(text) = serde_json::to_string(&msg) else {
                 break;
             };
-            if write.send(Message::Text(text.into())).await.is_err() {
+            if write.send(Message::Text(text)).await.is_err() {
                 break;
             }
         }

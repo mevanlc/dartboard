@@ -98,7 +98,7 @@ fn run_listen(addr: SocketAddr) -> io::Result<()> {
     } else {
         addr
     };
-    let server = ServerHandle::spawn_local(InMemStore::default());
+    let server = ServerHandle::spawn_local(InMemStore);
     server.bind_ws(resolved)?;
     eprintln!("dartboard server listening on ws://{}", resolved);
     eprintln!("press ctrl-c to stop");

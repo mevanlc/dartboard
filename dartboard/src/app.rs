@@ -7,12 +7,12 @@ use crossterm::{clipboard::CopyToClipboard, execute};
 use rand::seq::SliceRandom;
 use ratatui::layout::Rect;
 
+use dartboard_client_ws::WebsocketClient;
 use dartboard_core::{
     ops::CellWrite, Canvas, CanvasOp, CellValue, Client, ClientOpId, Peer, Pos, RgbColor,
     ServerMsg, UserId,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
-use dartboard_client_ws::WebsocketClient;
 
 use crate::emoji;
 use crate::theme;
@@ -150,7 +150,10 @@ impl Selection {
 
     fn contains(self, pos: Pos) -> bool {
         let bounds = self.bounds();
-        if pos.x < bounds.min_x || pos.x > bounds.max_x || pos.y < bounds.min_y || pos.y > bounds.max_y
+        if pos.x < bounds.min_x
+            || pos.x > bounds.max_x
+            || pos.y < bounds.min_y
+            || pos.y > bounds.max_y
         {
             return false;
         }
@@ -325,7 +328,7 @@ impl App {
             })
             .collect();
 
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let mut clients: Vec<ClientBox> = users
             .iter()
             .map(|u| {
@@ -595,8 +598,8 @@ impl App {
     fn drain_server_events(&mut self) {
         match &mut self.transport {
             Transport::Embedded { clients, .. } => {
-                for i in 0..clients.len() {
-                    while let Some(msg) = clients[i].try_recv() {
+                for client in clients.iter_mut() {
+                    while let Some(msg) = client.try_recv() {
                         if let ServerMsg::OpBroadcast { op, .. } = msg {
                             self.canvas.apply(&op);
                         }
@@ -641,9 +644,7 @@ impl App {
                             });
                         }
                         ServerMsg::PeerLeft { user_id } => {
-                            if let Some(idx) =
-                                peers.iter().position(|p| p.user_id == user_id)
-                            {
+                            if let Some(idx) = peers.iter().position(|p| p.user_id == user_id) {
                                 peers.remove(idx);
                                 // Users: index 0 is self, peers start at index 1.
                                 let user_idx = idx + 1;
@@ -994,9 +995,15 @@ impl App {
     fn selection_has_unselected_neighbor(selection: Selection, pos: Pos) -> bool {
         let neighbors = [
             pos.x.checked_sub(1).map(|x| Pos { x, y: pos.y }),
-            Some(Pos { x: pos.x + 1, y: pos.y }),
+            Some(Pos {
+                x: pos.x + 1,
+                y: pos.y,
+            }),
             pos.y.checked_sub(1).map(|y| Pos { x: pos.x, y }),
-            Some(Pos { x: pos.x, y: pos.y + 1 }),
+            Some(Pos {
+                x: pos.x,
+                y: pos.y + 1,
+            }),
         ];
         neighbors
             .into_iter()
@@ -1017,7 +1024,8 @@ impl App {
         for y in bounds.min_y..=bounds.max_y {
             for x in bounds.min_x..=bounds.max_x {
                 let pos = Pos { x, y };
-                if selection.contains(pos) && Self::selection_has_unselected_neighbor(selection, pos)
+                if selection.contains(pos)
+                    && Self::selection_has_unselected_neighbor(selection, pos)
                 {
                     canvas.set_colored(pos, '*', color);
                 }
@@ -2159,8 +2167,8 @@ impl App {
                             if let Some(pos) = canvas_pos {
                                 let extend_selection = mouse.modifiers.contains(KeyModifiers::ALT)
                                     && self.selection_anchor.is_some();
-                                let ellipse_drag =
-                                    mouse.modifiers.contains(KeyModifiers::CONTROL) && !extend_selection;
+                                let ellipse_drag = mouse.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !extend_selection;
 
                                 if extend_selection {
                                     if let Some(anchor) = self.selection_anchor {
@@ -2419,24 +2427,17 @@ fn random_available_user_color(used_colors: &[RgbColor]) -> RgbColor {
         .collect::<Vec<_>>()
         .choose(&mut rng)
         .copied()
-        .or_else(|| {
-            theme::PLAYER_PALETTE
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-                .choose(&mut rng)
-                .copied()
-        })
+        .or_else(|| theme::PLAYER_PALETTE.to_vec().choose(&mut rng).copied())
         .unwrap_or(theme::DEFAULT_GLYPH_FG)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{App, HelpTab, Mode, SelectionShape, SWATCH_CAPACITY};
-    use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
     use ratatui::layout::Rect;
 
     fn setup_floating_wide_brush() -> App {
@@ -2453,10 +2454,7 @@ mod tests {
 
     fn wide_origins_in_row(app: &App, y: usize, x_max: usize) -> Vec<usize> {
         (0..=x_max)
-            .filter_map(|x| match app.canvas.cell(Pos { x, y }) {
-                Some(CellValue::Wide(_)) => Some(x),
-                _ => None,
-            })
+            .filter(|&x| matches!(app.canvas.cell(Pos { x, y }), Some(CellValue::Wide(_))))
             .collect()
     }
 
@@ -2793,18 +2791,12 @@ mod tests {
     fn undo_propagates_to_server() {
         let mut app = App::new();
         app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
-        assert_eq!(
-            app.server_snapshot_for_test().get(Pos { x: 0, y: 0 }),
-            'A'
-        );
+        assert_eq!(app.server_snapshot_for_test().get(Pos { x: 0, y: 0 }), 'A');
 
         app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         app.drain_server_events();
         assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), ' ');
-        assert_eq!(
-            app.server_snapshot_for_test().get(Pos { x: 0, y: 0 }),
-            ' '
-        );
+        assert_eq!(app.server_snapshot_for_test().get(Pos { x: 0, y: 0 }), ' ');
     }
 
     #[test]
@@ -2860,7 +2852,7 @@ mod tests {
         use dartboard_core::{Canvas, CanvasOp, Client, RgbColor};
         use dartboard_server::{Hello, InMemStore, ServerHandle};
 
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let mut alice = server.connect_local(Hello {
             name: "alice".into(),
             color: RgbColor::new(255, 0, 0),
@@ -2904,7 +2896,7 @@ mod tests {
         use dartboard_core::{CanvasOp, Client};
         use dartboard_server::{InMemStore, ServerHandle};
 
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let addr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -2962,7 +2954,7 @@ mod tests {
 
         // stand up a server + one "other" local peer to represent the
         // multi-user condition, then a ws client that drives App::new_remote.
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let addr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()

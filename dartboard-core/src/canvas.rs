@@ -171,12 +171,7 @@ impl Canvas {
         self.put_glyph_with_optional_color(pos, ch, Some(fg))
     }
 
-    fn put_glyph_with_optional_color(
-        &mut self,
-        pos: Pos,
-        ch: char,
-        fg: Option<RgbColor>,
-    ) -> bool {
+    fn put_glyph_with_optional_color(&mut self, pos: Pos, ch: char, fg: Option<RgbColor>) -> bool {
         if pos.x >= self.width || pos.y >= self.height {
             return false;
         }

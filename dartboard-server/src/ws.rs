@@ -35,7 +35,7 @@ pub(crate) async fn accept_and_run(
             let Ok(text) = serde_json::to_string(&msg) else {
                 break;
             };
-            if write.send(Message::Text(text.into())).await.is_err() {
+            if write.send(Message::Text(text)).await.is_err() {
                 break;
             }
         }

@@ -17,8 +17,14 @@ pub struct Peer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMsg {
-    Hello { name: String, color: RgbColor },
-    Op { client_op_id: ClientOpId, op: CanvasOp },
+    Hello {
+        name: String,
+        color: RgbColor,
+    },
+    Op {
+        client_op_id: ClientOpId,
+        op: CanvasOp,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

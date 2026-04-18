@@ -112,9 +112,9 @@ impl ServerHandle {
         });
 
         for entry in &state.clients {
-            entry.sender.send(ServerMsg::PeerJoined {
-                peer: peer.clone(),
-            });
+            entry
+                .sender
+                .send(ServerMsg::PeerJoined { peer: peer.clone() });
         }
 
         state.clients.push(ClientEntry { peer, sender });
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn welcome_contains_snapshot_and_existing_peers() {
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let mut alice = server.connect_local(Hello {
             name: "alice".into(),
             color: red(),
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn submit_op_broadcasts_and_acks() {
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let mut alice = server.connect_local(Hello {
             name: "alice".into(),
             color: red(),
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn sequence_numbers_are_monotonic() {
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let mut client = server.connect_local(Hello {
             name: "solo".into(),
             color: red(),
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn shift_row_op_is_applied_server_side() {
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let mut client = server.connect_local(Hello {
             name: "solo".into(),
             color: red(),
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn dropping_client_broadcasts_peer_left() {
-        let server = ServerHandle::spawn_local(InMemStore::default());
+        let server = ServerHandle::spawn_local(InMemStore);
         let mut alice = server.connect_local(Hello {
             name: "alice".into(),
             color: red(),
@@ -421,7 +421,9 @@ mod tests {
         }
         let events = drain_events(&mut alice);
         assert!(
-            events.iter().any(|m| matches!(m, ServerMsg::PeerLeft { .. })),
+            events
+                .iter()
+                .any(|m| matches!(m, ServerMsg::PeerLeft { .. })),
             "expected PeerLeft in {:?}",
             events
         );

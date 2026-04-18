@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use dartboard_core::{CanvasOp, Client, Pos, RgbColor, ServerMsg};
 use dartboard_client_ws::{Hello, WebsocketClient};
+use dartboard_core::{CanvasOp, Client, Pos, RgbColor, ServerMsg};
 use dartboard_server::{InMemStore, ServerHandle};
 
 /// Try to pick a loopback port that isn't currently bound. Not perfect
@@ -52,7 +52,7 @@ fn wait_for<C: Client, F: Fn(&ServerMsg) -> bool>(
 
 #[test]
 fn ws_two_clients_see_each_others_paints() {
-    let server = ServerHandle::spawn_local(InMemStore::default());
+    let server = ServerHandle::spawn_local(InMemStore);
     let addr = pick_addr();
     server.bind_ws(addr).expect("bind_ws should succeed");
     let url = format!("ws://{}", addr);
@@ -87,7 +87,15 @@ fn ws_two_clients_see_each_others_paints() {
 
     let seen = wait_for(
         &mut bob,
-        |m| matches!(m, ServerMsg::OpBroadcast { op: CanvasOp::PaintCell { ch: 'X', .. }, .. }),
+        |m| {
+            matches!(
+                m,
+                ServerMsg::OpBroadcast {
+                    op: CanvasOp::PaintCell { ch: 'X', .. },
+                    ..
+                }
+            )
+        },
         Duration::from_secs(2),
     );
     assert!(seen.is_some(), "bob should see alice's OpBroadcast");
@@ -98,7 +106,7 @@ fn ws_two_clients_see_each_others_paints() {
 
 #[test]
 fn ws_concurrent_disjoint_paints_both_land() {
-    let server = ServerHandle::spawn_local(InMemStore::default());
+    let server = ServerHandle::spawn_local(InMemStore);
     let addr = pick_addr();
     server.bind_ws(addr).expect("bind_ws should succeed");
     let url = format!("ws://{}", addr);

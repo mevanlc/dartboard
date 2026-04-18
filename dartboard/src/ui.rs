@@ -7,9 +7,9 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, HelpTab, Swatch, SWATCH_CAPACITY};
-use dartboard_core::{CellValue, Pos};
 use crate::emoji;
 use crate::theme;
+use dartboard_core::{CellValue, Pos};
 
 const USER_LIST_MIN_WIDTH: u16 = 12;
 const USER_LIST_MAX_WIDTH: u16 = 24;
@@ -166,7 +166,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             cx >= rect.x && cx < rect.x + rect.width && cy >= rect.y && cy < rect.y + rect.height
         };
         let under_overlay = app.swatch_body_hits.iter().flatten().any(point_in)
-            || user_list_rect.as_ref().map_or(false, point_in);
+            || user_list_rect.as_ref().is_some_and(point_in);
         if !under_overlay {
             frame.set_cursor_position((cx, cy));
         }
@@ -598,11 +598,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn render_help_tabs(
-    buf: &mut Buffer,
-    area: Rect,
-    active: HelpTab,
-) -> [Option<(HelpTab, Rect)>; 2] {
+fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) -> [Option<(HelpTab, Rect)>; 2] {
     let tabs = [("common", HelpTab::Common), ("advanced", HelpTab::Advanced)];
     let mut hits: [Option<(HelpTab, Rect)>; 2] = [None; 2];
     let mut x = area.x + 1;
