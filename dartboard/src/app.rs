@@ -8,7 +8,7 @@ use rand::seq::SliceRandom;
 use ratatui::layout::Rect;
 
 use dartboard_core::{
-    Canvas, CanvasOp, CellValue, Client, Pos, RgbColor, ServerMsg,
+    ops::CellWrite, Canvas, CanvasOp, CellValue, Client, Pos, RgbColor, ServerMsg,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
@@ -417,14 +417,15 @@ impl App {
         let before = self.canvas.clone();
         edit(&mut self.canvas);
         if self.canvas != before {
+            let op = diff_canvas_op(&before, &self.canvas);
             self.undo_stack.push(before);
             if self.undo_stack.len() > UNDO_DEPTH_CAP {
                 self.undo_stack.remove(0);
             }
             self.redo_stack.clear();
-            self.submit_via_active(CanvasOp::Replace {
-                canvas: self.canvas.clone(),
-            });
+            if let Some(op) = op {
+                self.submit_via_active(op);
+            }
         }
     }
 
@@ -454,10 +455,11 @@ impl App {
             return;
         };
         let current = std::mem::replace(&mut self.canvas, previous);
+        let op = diff_canvas_op(&current, &self.canvas);
         self.redo_stack.push(current);
-        self.submit_via_active(CanvasOp::Replace {
-            canvas: self.canvas.clone(),
-        });
+        if let Some(op) = op {
+            self.submit_via_active(op);
+        }
     }
 
     fn redo(&mut self) {
@@ -465,10 +467,11 @@ impl App {
             return;
         };
         let current = std::mem::replace(&mut self.canvas, next);
+        let op = diff_canvas_op(&current, &self.canvas);
         self.undo_stack.push(current);
-        self.submit_via_active(CanvasOp::Replace {
-            canvas: self.canvas.clone(),
-        });
+        if let Some(op) = op {
+            self.submit_via_active(op);
+        }
     }
 
     fn visible_bounds(&self) -> Bounds {
@@ -2146,6 +2149,52 @@ fn swatch_home_row_index(ch: char) -> Option<usize> {
     }
 }
 
+fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
+    use std::collections::HashSet;
+
+    let mut origins: HashSet<Pos> = HashSet::new();
+    for (pos, cell) in before.iter() {
+        if matches!(cell, CellValue::Narrow(_) | CellValue::Wide(_)) {
+            origins.insert(*pos);
+        }
+    }
+    for (pos, cell) in after.iter() {
+        if matches!(cell, CellValue::Narrow(_) | CellValue::Wide(_)) {
+            origins.insert(*pos);
+        }
+    }
+
+    let mut origins: Vec<Pos> = origins.into_iter().collect();
+    origins.sort_by_key(|p| (p.y, p.x));
+
+    let mut writes: Vec<CellWrite> = Vec::new();
+    for pos in origins {
+        let a_cell = after.cell(pos);
+        let b_cell = before.cell(pos);
+        let a_fg = after.fg(pos);
+        let b_fg = before.fg(pos);
+        if a_cell == b_cell && a_fg == b_fg {
+            continue;
+        }
+        match a_cell {
+            Some(CellValue::Narrow(ch)) | Some(CellValue::Wide(ch)) => {
+                let fg = a_fg.unwrap_or(theme::DEFAULT_GLYPH_FG);
+                writes.push(CellWrite::Paint { pos, ch, fg });
+            }
+            _ => writes.push(CellWrite::Clear { pos }),
+        }
+    }
+
+    match writes.len() {
+        0 => None,
+        1 => Some(match writes.remove(0) {
+            CellWrite::Paint { pos, ch, fg } => CanvasOp::PaintCell { pos, ch, fg },
+            CellWrite::Clear { pos } => CanvasOp::ClearCell { pos },
+        }),
+        _ => Some(CanvasOp::PaintRegion { cells: writes }),
+    }
+}
+
 fn random_available_user_color(used_colors: &[RgbColor]) -> RgbColor {
     let mut rng = rand::thread_rng();
     theme::PLAYER_PALETTE
@@ -2169,7 +2218,7 @@ fn random_available_user_color(used_colors: &[RgbColor]) -> RgbColor {
 #[cfg(test)]
 mod tests {
     use super::{App, HelpTab, Mode, SelectionShape, SWATCH_CAPACITY};
-    use dartboard_core::{CellValue, Pos};
+    use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -2535,6 +2584,93 @@ mod tests {
         app.drain_server_events();
         assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), ' ');
         assert_eq!(app.server.canvas_snapshot().get(Pos { x: 0, y: 0 }), ' ');
+    }
+
+    #[test]
+    fn single_cell_paint_emits_paint_cell_op() {
+        use dartboard_core::CanvasOp;
+        let before = Canvas::with_size(8, 4);
+        let mut after = before.clone();
+        after.set_colored(Pos { x: 1, y: 1 }, 'A', RgbColor::new(10, 20, 30));
+        let op = super::diff_canvas_op(&before, &after).expect("diff should emit");
+        match op {
+            CanvasOp::PaintCell { pos, ch, fg } => {
+                assert_eq!(pos, Pos { x: 1, y: 1 });
+                assert_eq!(ch, 'A');
+                assert_eq!(fg, RgbColor::new(10, 20, 30));
+            }
+            other => panic!("expected PaintCell, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn single_cell_clear_emits_clear_cell_op() {
+        use dartboard_core::CanvasOp;
+        let mut before = Canvas::with_size(8, 4);
+        before.set(Pos { x: 3, y: 2 }, 'Q');
+        let mut after = before.clone();
+        after.clear_cell(Pos { x: 3, y: 2 });
+        let op = super::diff_canvas_op(&before, &after).expect("diff should emit");
+        match op {
+            CanvasOp::ClearCell { pos } => assert_eq!(pos, Pos { x: 3, y: 2 }),
+            other => panic!("expected ClearCell, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn multi_cell_edit_emits_paint_region() {
+        use dartboard_core::CanvasOp;
+        let before = Canvas::with_size(8, 4);
+        let mut after = before.clone();
+        after.set_colored(Pos { x: 0, y: 0 }, 'A', RgbColor::new(1, 2, 3));
+        after.set_colored(Pos { x: 1, y: 0 }, 'B', RgbColor::new(1, 2, 3));
+        let op = super::diff_canvas_op(&before, &after).expect("diff should emit");
+        match op {
+            CanvasOp::PaintRegion { cells } => assert_eq!(cells.len(), 2),
+            other => panic!("expected PaintRegion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn concurrent_edits_from_two_clients_compose_server_side() {
+        // Regression guard for the "Replace wipes other client's work" bug.
+        // Two clients submit edits to disjoint cells; the server canvas must
+        // hold both after both apply.
+        use dartboard_core::{Canvas, CanvasOp, Client, RgbColor};
+        use dartboard_server::{Hello, InMemStore, ServerHandle};
+
+        let server = ServerHandle::spawn_local(InMemStore::default());
+        let mut alice = server.connect_local(Hello {
+            name: "alice".into(),
+            color: RgbColor::new(255, 0, 0),
+        });
+        let mut bob = server.connect_local(Hello {
+            name: "bob".into(),
+            color: RgbColor::new(0, 0, 255),
+        });
+        while alice.try_recv().is_some() {}
+        while bob.try_recv().is_some() {}
+
+        let empty = Canvas::with_size(352, 96);
+
+        let mut a_mirror = empty.clone();
+        a_mirror.set_colored(Pos { x: 0, y: 0 }, 'X', RgbColor::new(255, 0, 0));
+        let a_op = super::diff_canvas_op(&empty, &a_mirror).unwrap();
+        assert!(
+            matches!(a_op, CanvasOp::PaintCell { .. }),
+            "expected PaintCell, got {:?}",
+            a_op
+        );
+        alice.submit_op(a_op);
+
+        let mut b_mirror = empty.clone();
+        b_mirror.set_colored(Pos { x: 1, y: 0 }, 'Y', RgbColor::new(0, 0, 255));
+        let b_op = super::diff_canvas_op(&empty, &b_mirror).unwrap();
+        bob.submit_op(b_op);
+
+        let snap = server.canvas_snapshot();
+        assert_eq!(snap.get(Pos { x: 0, y: 0 }), 'X');
+        assert_eq!(snap.get(Pos { x: 1, y: 0 }), 'Y');
     }
 
     #[test]
