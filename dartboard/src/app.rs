@@ -6,9 +6,9 @@ use crossterm::event::{
 use crossterm::{clipboard::CopyToClipboard, execute};
 use rand::seq::SliceRandom;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 
-use crate::canvas::{Canvas, CellValue, Pos};
+use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
+
 use crate::emoji;
 use crate::theme;
 
@@ -232,7 +232,7 @@ impl Default for UserSession {
 #[derive(Debug, Clone)]
 pub struct LocalUser {
     pub name: String,
-    pub color: Color,
+    pub color: RgbColor,
     session: UserSession,
 }
 
@@ -386,7 +386,7 @@ impl App {
         self.active_user_idx
     }
 
-    pub fn active_user_color(&self) -> Color {
+    pub fn active_user_color(&self) -> RgbColor {
         self.users[self.active_user_idx].color
     }
 
@@ -656,7 +656,7 @@ impl App {
             .normalized_for_canvas(&self.canvas)
     }
 
-    fn fill_bounds_on(canvas: &mut Canvas, bounds: Bounds, ch: char, fg: Color) {
+    fn fill_bounds_on(canvas: &mut Canvas, bounds: Bounds, ch: char, fg: RgbColor) {
         for y in bounds.min_y..=bounds.max_y {
             let mut x = bounds.min_x;
             while x <= bounds.max_x {
@@ -681,7 +681,7 @@ impl App {
         selection: Selection,
         bounds: Bounds,
         ch: char,
-        fg: Color,
+        fg: RgbColor,
     ) {
         if selection.shape == SelectionShape::Rect {
             Self::fill_bounds_on(canvas, bounds, ch, fg);
@@ -737,7 +737,7 @@ impl App {
         canvas: &mut Canvas,
         selection: Selection,
         bounds: Bounds,
-        color: Color,
+        color: RgbColor,
     ) {
         if selection.shape == SelectionShape::Rect {
             return;
@@ -2087,7 +2087,7 @@ fn swatch_home_row_index(ch: char) -> Option<usize> {
     }
 }
 
-fn random_available_user_color(used_colors: &[Color]) -> Color {
+fn random_available_user_color(used_colors: &[RgbColor]) -> RgbColor {
     let mut rng = rand::thread_rng();
     theme::PLAYER_PALETTE
         .iter()
@@ -2104,13 +2104,13 @@ fn random_available_user_color(used_colors: &[Color]) -> Color {
                 .choose(&mut rng)
                 .copied()
         })
-        .unwrap_or(theme::TEXT)
+        .unwrap_or(theme::DEFAULT_GLYPH_FG)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{App, HelpTab, Mode, SelectionShape, SWATCH_CAPACITY};
-    use crate::canvas::{CellValue, Pos};
+    use dartboard_core::{CellValue, Pos};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };

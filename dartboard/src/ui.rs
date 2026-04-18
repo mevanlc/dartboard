@@ -7,7 +7,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, HelpTab, Swatch, SWATCH_CAPACITY};
-use crate::canvas::{CellValue, Pos};
+use dartboard_core::{CellValue, Pos};
 use crate::emoji;
 use crate::theme;
 
@@ -50,7 +50,12 @@ impl<'a> Widget for CanvasWidget<'a> {
 
                 let pos = Pos { x, y };
                 let cell_value = self.app.canvas.cell(pos);
-                let glyph_fg = self.app.canvas.fg(pos).unwrap_or(theme::TEXT);
+                let glyph_fg = self
+                    .app
+                    .canvas
+                    .fg(pos)
+                    .map(theme::rat)
+                    .unwrap_or(theme::TEXT);
 
                 if has_selection && self.app.is_selected(pos) {
                     cell.set_bg(theme::SELECTION_BG).set_fg(theme::HIGHLIGHT);
@@ -67,7 +72,7 @@ impl<'a> Widget for CanvasWidget<'a> {
             let cb = &floating.clipboard;
             let fx = self.app.cursor.x;
             let fy = self.app.cursor.y;
-            let active_color = self.app.active_user_color();
+            let active_color = theme::rat(self.app.active_user_color());
 
             for cy in 0..cb.height {
                 for cx in 0..cb.width {
@@ -513,14 +518,14 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
                     Line::from(Span::styled(
                         format!("{:<width$}", line, width = max_name_width),
                         Style::default()
-                            .fg(user.color)
+                            .fg(theme::rat(user.color))
                             .bg(theme::SELECTION_BG)
                             .add_modifier(Modifier::BOLD),
                     ))
                 } else {
                     Line::from(Span::styled(
                         format!("{:<width$}", line, width = max_name_width),
-                        Style::default().fg(user.color),
+                        Style::default().fg(theme::rat(user.color)),
                     ))
                 }
             })

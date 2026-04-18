@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
-use ratatui::style::Color;
+use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthChar;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use crate::color::RgbColor;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pos {
     pub x: usize,
     pub y: usize,
@@ -12,36 +14,81 @@ pub struct Pos {
 pub const DEFAULT_WIDTH: usize = 352;
 pub const DEFAULT_HEIGHT: usize = 96;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CellValue {
     Narrow(char),
     Wide(char),
     WideCont,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Glyph {
     pub pos: Pos,
     pub ch: char,
     pub width: usize,
-    pub fg: Option<Color>,
+    pub fg: Option<RgbColor>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "CanvasWire", from = "CanvasWire")]
 pub struct Canvas {
     cells: HashMap<Pos, CellValue>,
-    colors: HashMap<Pos, Color>,
+    colors: HashMap<Pos, RgbColor>,
     pub width: usize,
     pub height: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+struct CanvasWire {
+    width: usize,
+    height: usize,
+    cells: Vec<(Pos, CellValue)>,
+    colors: Vec<(Pos, RgbColor)>,
+}
+
+impl From<Canvas> for CanvasWire {
+    fn from(c: Canvas) -> Self {
+        let mut cells: Vec<_> = c.cells.into_iter().collect();
+        cells.sort_by_key(|(p, _)| (p.y, p.x));
+        let mut colors: Vec<_> = c.colors.into_iter().collect();
+        colors.sort_by_key(|(p, _)| (p.y, p.x));
+        Self {
+            width: c.width,
+            height: c.height,
+            cells,
+            colors,
+        }
+    }
+}
+
+impl From<CanvasWire> for Canvas {
+    fn from(w: CanvasWire) -> Self {
+        Self {
+            cells: w.cells.into_iter().collect(),
+            colors: w.colors.into_iter().collect(),
+            width: w.width,
+            height: w.height,
+        }
+    }
+}
+
+impl Default for Canvas {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Canvas {
     pub fn new() -> Self {
+        Self::with_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+    }
+
+    pub fn with_size(width: usize, height: usize) -> Self {
         Self {
             cells: HashMap::new(),
             colors: HashMap::new(),
-            width: DEFAULT_WIDTH,
-            height: DEFAULT_HEIGHT,
+            width,
+            height,
         }
     }
 
@@ -53,7 +100,7 @@ impl Canvas {
         self.cells.get(&pos).copied()
     }
 
-    pub fn fg(&self, pos: Pos) -> Option<Color> {
+    pub fn fg(&self, pos: Pos) -> Option<RgbColor> {
         let origin = self.glyph_origin(pos)?;
         self.colors.get(&origin).copied()
     }
@@ -73,7 +120,6 @@ impl Canvas {
         }
     }
 
-    #[allow(dead_code)]
     pub fn glyph_at(&self, pos: Pos) -> Option<Glyph> {
         let origin = self.glyph_origin(pos)?;
         match self.cell(origin)? {
@@ -117,16 +163,20 @@ impl Canvas {
         }
     }
 
-    #[allow(dead_code)]
     pub fn put_glyph(&mut self, pos: Pos, ch: char) -> bool {
         self.put_glyph_with_optional_color(pos, ch, None)
     }
 
-    pub fn put_glyph_colored(&mut self, pos: Pos, ch: char, fg: Color) -> bool {
+    pub fn put_glyph_colored(&mut self, pos: Pos, ch: char, fg: RgbColor) -> bool {
         self.put_glyph_with_optional_color(pos, ch, Some(fg))
     }
 
-    fn put_glyph_with_optional_color(&mut self, pos: Pos, ch: char, fg: Option<Color>) -> bool {
+    fn put_glyph_with_optional_color(
+        &mut self,
+        pos: Pos,
+        ch: char,
+        fg: Option<RgbColor>,
+    ) -> bool {
         if pos.x >= self.width || pos.y >= self.height {
             return false;
         }
@@ -173,12 +223,11 @@ impl Canvas {
         true
     }
 
-    #[allow(dead_code)]
     pub fn set(&mut self, pos: Pos, ch: char) {
         let _ = self.put_glyph(pos, ch);
     }
 
-    pub fn set_colored(&mut self, pos: Pos, ch: char, fg: Color) {
+    pub fn set_colored(&mut self, pos: Pos, ch: char, fg: RgbColor) {
         let _ = self.put_glyph_colored(pos, ch, fg);
     }
 
@@ -186,7 +235,6 @@ impl Canvas {
         self.clear_cell(pos);
     }
 
-    #[allow(dead_code)]
     pub fn get(&self, pos: Pos) -> char {
         match self.cell(pos) {
             Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => ch,
@@ -194,7 +242,6 @@ impl Canvas {
         }
     }
 
-    #[allow(dead_code)] // will be used for network sync
     pub fn iter(&self) -> impl Iterator<Item = (&Pos, &CellValue)> {
         self.cells.iter()
     }
@@ -344,7 +391,7 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::{Canvas, CellValue, Pos};
-    use ratatui::style::Color;
+    use crate::color::RgbColor;
 
     #[test]
     fn row_push_and_pull_are_directional() {
@@ -411,7 +458,7 @@ mod tests {
     #[test]
     fn colored_glyph_exposes_foreground_on_origin_and_continuation() {
         let mut canvas = Canvas::new();
-        let color = Color::Rgb(84, 196, 255);
+        let color = RgbColor::new(84, 196, 255);
 
         canvas.set_colored(Pos { x: 3, y: 2 }, '🌱', color);
 
@@ -422,12 +469,23 @@ mod tests {
     #[test]
     fn directional_push_preserves_glyph_color() {
         let mut canvas = Canvas::new();
-        let color = Color::Rgb(192, 132, 255);
+        let color = RgbColor::new(192, 132, 255);
 
         canvas.set_colored(Pos { x: 1, y: 0 }, 'A', color);
         canvas.push_left(0, 1);
 
         assert_eq!(canvas.get(Pos { x: 0, y: 0 }), 'A');
         assert_eq!(canvas.fg(Pos { x: 0, y: 0 }), Some(color));
+    }
+
+    #[test]
+    fn canvas_serde_roundtrips() {
+        let mut canvas = Canvas::with_size(8, 4);
+        canvas.set_colored(Pos { x: 1, y: 1 }, 'A', RgbColor::new(10, 20, 30));
+        canvas.set(Pos { x: 3, y: 2 }, '🌱');
+
+        let j = serde_json::to_string(&canvas).unwrap();
+        let back: Canvas = serde_json::from_str(&j).unwrap();
+        assert_eq!(canvas, back);
     }
 }

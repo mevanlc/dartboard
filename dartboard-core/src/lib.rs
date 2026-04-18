@@ -1,2 +1,5 @@
-// dartboard-core: canvas types, wire protocol, Client trait.
-// Populated by a later refactor step.
+pub mod canvas;
+pub mod color;
+
+pub use canvas::{Canvas, CellValue, Glyph, Pos, DEFAULT_HEIGHT, DEFAULT_WIDTH};
+pub use color::RgbColor;

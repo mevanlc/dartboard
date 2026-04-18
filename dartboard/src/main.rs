@@ -1,5 +1,4 @@
 mod app;
-mod canvas;
 mod emoji;
 mod theme;
 mod ui;
