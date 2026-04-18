@@ -244,6 +244,7 @@ name = "dartboard"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "dartboard-client-ws",
  "dartboard-core",
  "dartboard-server",
  "emojis",

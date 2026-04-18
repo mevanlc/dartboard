@@ -122,10 +122,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             " lifted \u{00b7} Esc to cancel ".to_string()
         }
     } else {
-        format!(
-            " {} help \u{00b7} {} glyphs \u{00b7} {} quit ",
-            "^P", "^]", "^Q"
-        )
+        let peers = app.peer_count();
+        if peers > 1 {
+            format!(
+                " {} help \u{00b7} {} glyphs \u{00b7} {} peers \u{00b7} {} quit ",
+                "^P", "^]", peers, "^Q"
+            )
+        } else {
+            format!(
+                " {} help \u{00b7} {} glyphs \u{00b7} {} quit ",
+                "^P", "^]", "^Q"
+            )
+        }
     };
     let title_cols = display_width(&title) as u16;
     let outer = Block::default()

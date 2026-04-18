@@ -8,15 +8,53 @@ use rand::seq::SliceRandom;
 use ratatui::layout::Rect;
 
 use dartboard_core::{
-    ops::CellWrite, Canvas, CanvasOp, CellValue, Client, Pos, RgbColor, ServerMsg,
+    ops::CellWrite, Canvas, CanvasOp, CellValue, Client, ClientOpId, Peer, Pos, RgbColor,
+    ServerMsg, UserId,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
+use dartboard_client_ws::WebsocketClient;
 
 use crate::emoji;
 use crate::theme;
 
 const UNDO_DEPTH_CAP: usize = 500;
 pub const SWATCH_CAPACITY: usize = 5;
+
+/// The transport backing a single dartboard session. Embedded runs a
+/// ServerHandle in-process with one LocalClient per local user; Remote
+/// connects to a dartboard `--listen` peer over ws with a single client.
+pub enum Transport {
+    Embedded {
+        server: ServerHandle,
+        clients: Vec<ClientBox>,
+    },
+    Remote {
+        client: ClientBox,
+        peers: Vec<Peer>,
+        my_user_id: Option<UserId>,
+    },
+}
+
+/// Concrete enum wrapping the two Client impls so App doesn't need dyn Client.
+pub enum ClientBox {
+    Local(LocalClient),
+    Ws(WebsocketClient),
+}
+
+impl Client for ClientBox {
+    fn submit_op(&mut self, op: CanvasOp) -> ClientOpId {
+        match self {
+            Self::Local(c) => c.submit_op(op),
+            Self::Ws(c) => c.submit_op(op),
+        }
+    }
+    fn try_recv(&mut self) -> Option<ServerMsg> {
+        match self {
+            Self::Local(c) => c.try_recv(),
+            Self::Ws(c) => c.try_recv(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwatchZone {
@@ -267,9 +305,7 @@ pub struct App {
     redo_stack: Vec<Canvas>,
     users: Vec<LocalUser>,
     active_user_idx: usize,
-    #[allow(dead_code)] // used by peer_count; wired into WS-mode undo gate in PLAN-MULTIPLAYER-WS-DEMO
-    server: ServerHandle,
-    clients: Vec<LocalClient>,
+    transport: Transport,
 }
 
 impl App {
@@ -290,13 +326,13 @@ impl App {
             .collect();
 
         let server = ServerHandle::spawn_local(InMemStore::default());
-        let mut clients: Vec<LocalClient> = users
+        let mut clients: Vec<ClientBox> = users
             .iter()
             .map(|u| {
-                server.connect_local(Hello {
+                ClientBox::Local(server.connect_local(Hello {
                     name: u.name.clone(),
                     color: u.color,
-                })
+                }))
             })
             .collect();
         for client in &mut clients {
@@ -332,8 +368,54 @@ impl App {
             redo_stack: Vec::new(),
             users,
             active_user_idx: 0,
-            server,
-            clients,
+            transport: Transport::Embedded { server, clients },
+        }
+    }
+
+    /// Construct an App that talks to a remote dartboard server over ws
+    /// instead of an in-proc ServerHandle. There is exactly one local user
+    /// (the connected user); peer presence is tracked from server events.
+    pub fn new_remote(client: WebsocketClient, name: String, color: RgbColor) -> Self {
+        let default_session = UserSession::default();
+        let users = vec![LocalUser {
+            name,
+            color,
+            session: default_session.clone(),
+        }];
+        let current_session = default_session;
+        Self {
+            canvas: Canvas::new(),
+            cursor: current_session.cursor,
+            mode: current_session.mode,
+            should_quit: false,
+            show_help: current_session.show_help,
+            help_tab: current_session.help_tab,
+            emoji_picker_open: current_session.emoji_picker_open,
+            viewport: current_session.viewport,
+            viewport_origin: current_session.viewport_origin,
+            selection_anchor: current_session.selection_anchor,
+            selection_shape: current_session.selection_shape,
+            drag_origin: current_session.drag_origin,
+            pan_drag: current_session.pan_drag,
+            swatches: current_session.swatches,
+            floating: current_session.floating,
+            emoji_picker_state: current_session.emoji_picker_state,
+            icon_catalog: None,
+            swatch_body_hits: [None; SWATCH_CAPACITY],
+            swatch_pin_hits: [None; SWATCH_CAPACITY],
+            help_tab_hits: [None; 2],
+            paint_canvas_before: current_session.paint_canvas_before,
+            paint_stroke_anchor: current_session.paint_stroke_anchor,
+            paint_stroke_last: current_session.paint_stroke_last,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            users,
+            active_user_idx: 0,
+            transport: Transport::Remote {
+                client: ClientBox::Ws(client),
+                peers: Vec::new(),
+                my_user_id: None,
+            },
         }
     }
 
@@ -392,6 +474,11 @@ impl App {
         if self.users.is_empty() {
             return;
         }
+        // In Remote mode, index > 0 are read-only peer views — don't swap to
+        // them as if they were a local session.
+        if matches!(self.transport, Transport::Remote { .. }) {
+            return;
+        }
 
         self.sync_active_user_slot();
         let len = self.users.len() as isize;
@@ -413,6 +500,28 @@ impl App {
         self.users[self.active_user_idx].color
     }
 
+    #[cfg(test)]
+    fn server_snapshot_for_test(&self) -> Canvas {
+        match &self.transport {
+            Transport::Embedded { server, .. } => server.canvas_snapshot(),
+            Transport::Remote { .. } => self.canvas.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn client_user_ids_for_test(&self) -> Vec<UserId> {
+        match &self.transport {
+            Transport::Embedded { clients, .. } => clients
+                .iter()
+                .filter_map(|c| match c {
+                    ClientBox::Local(c) => Some(c.user_id()),
+                    ClientBox::Ws(_) => None,
+                })
+                .collect(),
+            Transport::Remote { .. } => Vec::new(),
+        }
+    }
+
     fn apply_canvas_edit(&mut self, edit: impl FnOnce(&mut Canvas)) {
         let before = self.canvas.clone();
         edit(&mut self.canvas);
@@ -430,27 +539,110 @@ impl App {
     }
 
     fn submit_via_active(&mut self, op: CanvasOp) {
-        if let Some(client) = self.clients.get_mut(self.active_user_idx) {
-            client.submit_op(op);
+        match &mut self.transport {
+            Transport::Embedded { clients, .. } => {
+                if let Some(c) = clients.get_mut(self.active_user_idx) {
+                    c.submit_op(op);
+                }
+            }
+            Transport::Remote { client, .. } => {
+                client.submit_op(op);
+            }
         }
     }
 
-    #[allow(dead_code)] // wired into the WS-mode undo gate in PLAN-MULTIPLAYER-WS-DEMO
+    /// Total participants the server is aware of. Embedded: every LocalClient
+    /// counts (all local users). Remote: our peers + us.
     pub fn peer_count(&self) -> usize {
-        self.server.peer_count()
+        match &self.transport {
+            Transport::Embedded { server, .. } => server.peer_count(),
+            Transport::Remote { peers, .. } => peers.len() + 1,
+        }
+    }
+
+    /// Undo/redo are only safe when no other peer could be editing. For
+    /// Embedded mode, every "peer" is a local user whose edits we own, so
+    /// undo is always allowed. For Remote mode, undo is gated to sole-peer
+    /// sessions — per PLAN-MULTIPLAYER-WS-DEMO.md, a local snapshot stack
+    /// isn't coherent under LWW with other writers.
+    fn undo_enabled(&self) -> bool {
+        match &self.transport {
+            Transport::Embedded { .. } => true,
+            Transport::Remote { peers, .. } => peers.is_empty(),
+        }
     }
 
     fn drain_server_events(&mut self) {
-        for i in 0..self.clients.len() {
-            while let Some(msg) = self.clients[i].try_recv() {
-                if let ServerMsg::OpBroadcast { op, .. } = msg {
-                    self.canvas.apply(&op);
+        match &mut self.transport {
+            Transport::Embedded { clients, .. } => {
+                for i in 0..clients.len() {
+                    while let Some(msg) = clients[i].try_recv() {
+                        if let ServerMsg::OpBroadcast { op, .. } = msg {
+                            self.canvas.apply(&op);
+                        }
+                    }
+                }
+            }
+            Transport::Remote {
+                client,
+                peers,
+                my_user_id,
+            } => {
+                while let Some(msg) = client.try_recv() {
+                    match msg {
+                        ServerMsg::Welcome {
+                            your_user_id,
+                            peers: initial_peers,
+                            snapshot,
+                        } => {
+                            *my_user_id = Some(your_user_id);
+                            *peers = initial_peers.clone();
+                            self.canvas = snapshot;
+                            self.users.truncate(1);
+                            for p in initial_peers {
+                                self.users.push(LocalUser {
+                                    name: p.name,
+                                    color: p.color,
+                                    session: UserSession::default(),
+                                });
+                            }
+                        }
+                        ServerMsg::OpBroadcast { op, from, .. } => {
+                            if Some(from) != *my_user_id {
+                                self.canvas.apply(&op);
+                            }
+                        }
+                        ServerMsg::PeerJoined { peer } => {
+                            peers.push(peer.clone());
+                            self.users.push(LocalUser {
+                                name: peer.name,
+                                color: peer.color,
+                                session: UserSession::default(),
+                            });
+                        }
+                        ServerMsg::PeerLeft { user_id } => {
+                            if let Some(idx) =
+                                peers.iter().position(|p| p.user_id == user_id)
+                            {
+                                peers.remove(idx);
+                                // Users: index 0 is self, peers start at index 1.
+                                let user_idx = idx + 1;
+                                if user_idx < self.users.len() {
+                                    self.users.remove(user_idx);
+                                }
+                            }
+                        }
+                        ServerMsg::Ack { .. } | ServerMsg::Reject { .. } => {}
+                    }
                 }
             }
         }
     }
 
     fn undo(&mut self) {
+        if !self.undo_enabled() {
+            return;
+        }
         let Some(previous) = self.undo_stack.pop() else {
             return;
         };
@@ -463,6 +655,9 @@ impl App {
     }
 
     fn redo(&mut self) {
+        if !self.undo_enabled() {
+            return;
+        }
         let Some(next) = self.redo_stack.pop() else {
             return;
         };
@@ -2570,7 +2765,7 @@ mod tests {
         let mut app = App::new();
         app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
         assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'A');
-        let server_snap = app.server.canvas_snapshot();
+        let server_snap = app.server_snapshot_for_test();
         assert_eq!(server_snap.get(Pos { x: 0, y: 0 }), 'A');
     }
 
@@ -2578,12 +2773,18 @@ mod tests {
     fn undo_propagates_to_server() {
         let mut app = App::new();
         app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
-        assert_eq!(app.server.canvas_snapshot().get(Pos { x: 0, y: 0 }), 'A');
+        assert_eq!(
+            app.server_snapshot_for_test().get(Pos { x: 0, y: 0 }),
+            'A'
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         app.drain_server_events();
         assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), ' ');
-        assert_eq!(app.server.canvas_snapshot().get(Pos { x: 0, y: 0 }), ' ');
+        assert_eq!(
+            app.server_snapshot_for_test().get(Pos { x: 0, y: 0 }),
+            ' '
+        );
     }
 
     #[test]
@@ -2674,9 +2875,60 @@ mod tests {
     }
 
     #[test]
+    fn undo_is_enabled_in_embedded_mode() {
+        let app = App::new();
+        assert!(app.undo_enabled());
+    }
+
+    #[test]
+    fn undo_disabled_when_another_peer_is_connected_in_remote_mode() {
+        use dartboard_client_ws::{Hello as WsHello, WebsocketClient};
+        use dartboard_server::{Hello, InMemStore, ServerHandle};
+
+        // stand up a server + one "other" local peer to represent the
+        // multi-user condition, then a ws client that drives App::new_remote.
+        let server = ServerHandle::spawn_local(InMemStore::default());
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        server.bind_ws(addr).unwrap();
+        // Pre-existing peer (simulates another dartboard --connect having joined first)
+        let _other = server.connect_local(Hello {
+            name: "other".into(),
+            color: RgbColor::new(10, 10, 10),
+        });
+
+        let url = format!("ws://{}", addr);
+        let client = WebsocketClient::connect(
+            &url,
+            WsHello {
+                name: "me".into(),
+                color: RgbColor::new(255, 0, 0),
+            },
+        )
+        .unwrap();
+
+        let mut app = App::new_remote(client, "me".into(), RgbColor::new(255, 0, 0));
+
+        // Drain Welcome + any peer events
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(2) && app.peer_count() <= 1 {
+            app.drain_server_events();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert!(app.peer_count() >= 2, "expected to see the other peer");
+        assert!(
+            !app.undo_enabled(),
+            "undo must be gated off while a remote peer is present"
+        );
+    }
+
+    #[test]
     fn each_local_user_has_its_own_client_user_id() {
         let app = App::new();
-        let ids: Vec<_> = app.clients.iter().map(|c| c.user_id()).collect();
+        let ids = app.client_user_ids_for_test();
         let mut unique = ids.clone();
         unique.sort();
         unique.dedup();
