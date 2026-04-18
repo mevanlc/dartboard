@@ -40,10 +40,18 @@ impl Mode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SelectionShape {
+    #[default]
+    Rect,
+    Ellipse,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Selection {
     pub anchor: Pos,
     pub cursor: Pos,
+    shape: SelectionShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +99,39 @@ impl Bounds {
             }
         }
         bounds
+    }
+}
+
+impl Selection {
+    fn bounds(self) -> Bounds {
+        Bounds::from_points(self.anchor, self.cursor)
+    }
+
+    fn contains(self, pos: Pos) -> bool {
+        let bounds = self.bounds();
+        if pos.x < bounds.min_x || pos.x > bounds.max_x || pos.y < bounds.min_y || pos.y > bounds.max_y
+        {
+            return false;
+        }
+
+        match self.shape {
+            SelectionShape::Rect => true,
+            SelectionShape::Ellipse => {
+                if bounds.width() <= 1 || bounds.height() <= 1 {
+                    return true;
+                }
+
+                let px = pos.x as f64 + 0.5;
+                let py = pos.y as f64 + 0.5;
+                let cx = (bounds.min_x + bounds.max_x + 1) as f64 / 2.0;
+                let cy = (bounds.min_y + bounds.max_y + 1) as f64 / 2.0;
+                let rx = bounds.width() as f64 / 2.0;
+                let ry = bounds.height() as f64 / 2.0;
+                let dx = (px - cx) / rx;
+                let dy = (py - cy) / ry;
+                dx * dx + dy * dy <= 1.0
+            }
+        }
     }
 }
 
@@ -153,6 +194,7 @@ struct UserSession {
     viewport: Rect,
     viewport_origin: Pos,
     selection_anchor: Option<Pos>,
+    selection_shape: SelectionShape,
     drag_origin: Option<Pos>,
     pan_drag: Option<PanDrag>,
     swatches: [Option<Swatch>; SWATCH_CAPACITY],
@@ -174,6 +216,7 @@ impl Default for UserSession {
             viewport: Rect::default(),
             viewport_origin: Pos { x: 0, y: 0 },
             selection_anchor: None,
+            selection_shape: SelectionShape::Rect,
             drag_origin: None,
             pan_drag: None,
             swatches: Default::default(),
@@ -204,6 +247,7 @@ pub struct App {
     pub viewport: Rect,
     pub viewport_origin: Pos,
     pub selection_anchor: Option<Pos>,
+    selection_shape: SelectionShape,
     drag_origin: Option<Pos>,
     pan_drag: Option<PanDrag>,
     pub swatches: [Option<Swatch>; SWATCH_CAPACITY],
@@ -249,6 +293,7 @@ impl App {
             viewport: current_session.viewport,
             viewport_origin: current_session.viewport_origin,
             selection_anchor: current_session.selection_anchor,
+            selection_shape: current_session.selection_shape,
             drag_origin: current_session.drag_origin,
             pan_drag: current_session.pan_drag,
             swatches: current_session.swatches,
@@ -277,6 +322,7 @@ impl App {
             viewport: self.viewport,
             viewport_origin: self.viewport_origin,
             selection_anchor: self.selection_anchor,
+            selection_shape: self.selection_shape,
             drag_origin: self.drag_origin,
             pan_drag: self.pan_drag,
             swatches: self.swatches.clone(),
@@ -297,6 +343,7 @@ impl App {
         self.viewport = session.viewport;
         self.viewport_origin = session.viewport_origin;
         self.selection_anchor = session.selection_anchor;
+        self.selection_shape = session.selection_shape;
         self.drag_origin = session.drag_origin;
         self.pan_drag = session.pan_drag;
         self.swatches = session.swatches;
@@ -547,15 +594,21 @@ impl App {
         self.clamp_cursor_to_visible_bounds();
     }
 
-    fn begin_selection(&mut self) {
+    fn begin_selection_with_shape(&mut self, shape: SelectionShape) {
         if self.selection_anchor.is_none() {
             self.selection_anchor = Some(self.cursor);
         }
+        self.selection_shape = shape;
         self.mode = Mode::Select;
+    }
+
+    fn begin_selection(&mut self) {
+        self.begin_selection_with_shape(SelectionShape::Rect);
     }
 
     fn clear_selection(&mut self) {
         self.selection_anchor = None;
+        self.selection_shape = SelectionShape::Rect;
         self.mode = Mode::Draw;
     }
 
@@ -563,12 +616,12 @@ impl App {
         self.selection_anchor.map(|anchor| Selection {
             anchor,
             cursor: self.cursor,
+            shape: self.selection_shape,
         })
     }
 
     fn selection_bounds(&self) -> Option<Bounds> {
-        self.selection()
-            .map(|selection| Bounds::from_points(selection.anchor, selection.cursor))
+        self.selection().map(Selection::bounds)
     }
 
     fn selection_or_cursor_bounds(&self) -> Bounds {
@@ -611,6 +664,84 @@ impl App {
         }
     }
 
+    fn fill_selection_on(
+        canvas: &mut Canvas,
+        selection: Selection,
+        bounds: Bounds,
+        ch: char,
+        fg: Color,
+    ) {
+        if selection.shape == SelectionShape::Rect {
+            Self::fill_bounds_on(canvas, bounds, ch, fg);
+            return;
+        }
+
+        let glyph_width = Canvas::display_width(ch);
+        for y in bounds.min_y..=bounds.max_y {
+            let mut x = bounds.min_x;
+            while x <= bounds.max_x {
+                let pos = Pos { x, y };
+                if !selection.contains(pos) {
+                    x += 1;
+                    continue;
+                }
+
+                if ch == ' ' {
+                    canvas.clear(pos);
+                    x += 1;
+                    continue;
+                }
+
+                if glyph_width == 1 {
+                    canvas.set_colored(pos, ch, fg);
+                    x += 1;
+                    continue;
+                }
+
+                if x < bounds.max_x && selection.contains(Pos { x: x + 1, y }) {
+                    let _ = canvas.put_glyph_colored(pos, ch, fg);
+                    x += glyph_width;
+                } else {
+                    x += 1;
+                }
+            }
+        }
+    }
+
+    fn selection_has_unselected_neighbor(selection: Selection, pos: Pos) -> bool {
+        let neighbors = [
+            pos.x.checked_sub(1).map(|x| Pos { x, y: pos.y }),
+            Some(Pos { x: pos.x + 1, y: pos.y }),
+            pos.y.checked_sub(1).map(|y| Pos { x: pos.x, y }),
+            Some(Pos { x: pos.x, y: pos.y + 1 }),
+        ];
+        neighbors
+            .into_iter()
+            .flatten()
+            .any(|neighbor| !selection.contains(neighbor))
+    }
+
+    fn draw_selection_border_on(
+        canvas: &mut Canvas,
+        selection: Selection,
+        bounds: Bounds,
+        color: Color,
+    ) {
+        if selection.shape == SelectionShape::Rect {
+            return;
+        }
+
+        for y in bounds.min_y..=bounds.max_y {
+            for x in bounds.min_x..=bounds.max_x {
+                let pos = Pos { x, y };
+                if selection.contains(pos) && Self::selection_has_unselected_neighbor(selection, pos)
+                {
+                    canvas.set_colored(pos, '*', color);
+                }
+            }
+        }
+    }
+
     fn capture_bounds(&self, bounds: Bounds) -> Clipboard {
         let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
         for y in bounds.min_y..=bounds.max_y {
@@ -625,14 +756,41 @@ impl App {
         }
     }
 
+    fn capture_selection(&self, selection: Selection) -> Clipboard {
+        let bounds = selection.bounds().normalized_for_canvas(&self.canvas);
+        let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
+        for y in bounds.min_y..=bounds.max_y {
+            for x in bounds.min_x..=bounds.max_x {
+                let pos = Pos { x, y };
+                let include = selection.contains(pos)
+                    || self
+                        .canvas
+                        .glyph_origin(pos)
+                        .is_some_and(|origin| selection.contains(origin));
+                cells.push(include.then(|| self.canvas.cell(pos)).flatten());
+            }
+        }
+        Clipboard {
+            width: bounds.width(),
+            height: bounds.height(),
+            cells,
+        }
+    }
+
     fn copy_selection_or_cell(&mut self) {
         if self.floating.is_some() {
             return;
         }
-        let bounds = self
-            .selection_or_cursor_bounds()
-            .normalized_for_canvas(&self.canvas);
-        self.push_swatch(self.capture_bounds(bounds));
+        let clipboard = match self.selection() {
+            Some(selection) => self.capture_selection(selection),
+            None => {
+                let bounds = self
+                    .selection_or_cursor_bounds()
+                    .normalized_for_canvas(&self.canvas);
+                self.capture_bounds(bounds)
+            }
+        };
+        self.push_swatch(clipboard);
     }
 
     fn export_bounds_as_text(&self, bounds: Bounds) -> String {
@@ -652,8 +810,34 @@ impl App {
         text
     }
 
+    fn export_selection_as_text(&self, selection: Selection) -> String {
+        let bounds = selection.bounds().normalized_for_canvas(&self.canvas);
+        let mut text = String::with_capacity(bounds.width() * bounds.height() + bounds.height());
+        for y in bounds.min_y..=bounds.max_y {
+            for x in bounds.min_x..=bounds.max_x {
+                let pos = Pos { x, y };
+                if selection.contains(pos) {
+                    match self.canvas.cell(pos) {
+                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => text.push(ch),
+                        Some(CellValue::WideCont) => {}
+                        None => text.push(' '),
+                    }
+                } else {
+                    text.push(' ');
+                }
+            }
+            if y != bounds.max_y {
+                text.push('\n');
+            }
+        }
+        text
+    }
+
     fn export_system_clipboard_text(&self) -> String {
-        self.export_bounds_as_text(self.system_clipboard_bounds())
+        match self.selection() {
+            Some(selection) => self.export_selection_as_text(selection),
+            None => self.export_bounds_as_text(self.system_clipboard_bounds()),
+        }
     }
 
     fn copy_to_system_clipboard(&self) {
@@ -665,12 +849,19 @@ impl App {
         if self.floating.is_some() {
             return;
         }
+        let selection = self.selection();
         let bounds = self
             .selection_or_cursor_bounds()
             .normalized_for_canvas(&self.canvas);
-        self.push_swatch(self.capture_bounds(bounds));
+        let clipboard = selection
+            .map(|selection| self.capture_selection(selection))
+            .unwrap_or_else(|| self.capture_bounds(bounds));
+        self.push_swatch(clipboard);
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ' ', color));
+        self.apply_canvas_edit(|canvas| match selection {
+            Some(selection) => Self::fill_selection_on(canvas, selection, bounds, ' ', color),
+            None => Self::fill_bounds_on(canvas, bounds, ' ', color),
+        });
     }
 
     fn push_swatch(&mut self, clipboard: Clipboard) {
@@ -997,6 +1188,7 @@ impl App {
     }
 
     fn smart_fill(&mut self) {
+        let selection = self.selection();
         let bounds = self.selection_or_cursor_bounds();
         let ch = if bounds.width() == 1 && bounds.height() > 1 {
             '|'
@@ -1006,16 +1198,25 @@ impl App {
             '*'
         };
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ch, color));
+        self.apply_canvas_edit(|canvas| match selection {
+            Some(selection) => Self::fill_selection_on(canvas, selection, bounds, ch, color),
+            None => Self::fill_bounds_on(canvas, bounds, ch, color),
+        });
     }
 
     fn draw_border(&mut self) {
-        let Some(bounds) = self.selection_bounds() else {
+        let Some(selection) = self.selection() else {
             return;
         };
+        let bounds = selection.bounds();
 
         let color = self.active_user_color();
         self.apply_canvas_edit(|canvas| {
+            if selection.shape == SelectionShape::Ellipse {
+                Self::draw_selection_border_on(canvas, selection, bounds, color);
+                return;
+            }
+
             if bounds.width() == 1 && bounds.height() == 1 {
                 canvas.set_colored(
                     Pos {
@@ -1120,11 +1321,15 @@ impl App {
     }
 
     fn fill_selection_or_cell(&mut self, ch: char) {
+        let selection = self.selection();
         let bounds = self
             .selection_or_cursor_bounds()
             .normalized_for_canvas(&self.canvas);
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| Self::fill_bounds_on(canvas, bounds, ch, color));
+        self.apply_canvas_edit(|canvas| match selection {
+            Some(selection) => Self::fill_selection_on(canvas, selection, bounds, ch, color),
+            None => Self::fill_bounds_on(canvas, bounds, ch, color),
+        });
     }
 
     fn insert_char(&mut self, ch: char) {
@@ -1660,6 +1865,8 @@ impl App {
                             if let Some(pos) = canvas_pos {
                                 let extend_selection = mouse.modifiers.contains(KeyModifiers::ALT)
                                     && self.selection_anchor.is_some();
+                                let ellipse_drag =
+                                    mouse.modifiers.contains(KeyModifiers::CONTROL) && !extend_selection;
 
                                 if extend_selection {
                                     if let Some(anchor) = self.selection_anchor {
@@ -1672,6 +1879,11 @@ impl App {
                                         self.clear_selection();
                                     }
                                     self.cursor = pos;
+                                    self.selection_shape = if ellipse_drag {
+                                        SelectionShape::Ellipse
+                                    } else {
+                                        SelectionShape::Rect
+                                    };
                                     self.drag_origin = Some(pos);
                                 }
                             }
@@ -1836,14 +2048,10 @@ impl App {
     }
 
     pub fn is_selected(&self, pos: Pos) -> bool {
-        let Some(bounds) = self.selection_bounds() else {
+        let Some(selection) = self.selection() else {
             return false;
         };
-
-        pos.x >= bounds.min_x
-            && pos.x <= bounds.max_x
-            && pos.y >= bounds.min_y
-            && pos.y <= bounds.max_y
+        selection.contains(pos)
     }
 }
 
@@ -1884,7 +2092,7 @@ fn random_available_user_color(used_colors: &[Color]) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Mode, SWATCH_CAPACITY};
+    use super::{App, Mode, SelectionShape, SWATCH_CAPACITY};
     use crate::canvas::{CellValue, Pos};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2309,6 +2517,84 @@ mod tests {
         assert_eq!(app.selection_anchor, Some(Pos { x: 2, y: 3 }));
         assert_eq!(app.cursor, Pos { x: 8, y: 7 });
         assert!(app.mode.is_selecting());
+    }
+
+    #[test]
+    fn ctrl_drag_creates_ellipse_selection_and_masks_fill() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 20, 10));
+
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 8,
+            row: 6,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 8,
+            row: 6,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+
+        assert_eq!(app.selection_anchor, Some(Pos { x: 2, y: 2 }));
+        assert_eq!(app.cursor, Pos { x: 8, y: 6 });
+        assert_eq!(app.selection_shape, SelectionShape::Ellipse);
+        assert!(app.mode.is_selecting());
+        assert!(app.is_selected(Pos { x: 5, y: 4 }));
+        assert!(!app.is_selected(Pos { x: 2, y: 2 }));
+
+        app.fill_selection_or_cell('x');
+
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 4 }), 'x');
+        assert_eq!(app.canvas.get(Pos { x: 2, y: 2 }), ' ');
+    }
+
+    #[test]
+    fn ellipse_selection_state_is_per_user() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 20, 10));
+
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 2,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 9,
+            row: 6,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 9,
+            row: 6,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.active_user_idx, 1);
+        assert_eq!(app.selection_anchor, None);
+        assert!(!app.mode.is_selecting());
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(app.active_user_idx, 0);
+        assert_eq!(app.selection_anchor, Some(Pos { x: 3, y: 2 }));
+        assert_eq!(app.cursor, Pos { x: 9, y: 6 });
+        assert_eq!(app.selection_shape, SelectionShape::Ellipse);
+        assert!(app.mode.is_selecting());
+        assert!(app.is_selected(Pos { x: 6, y: 4 }));
     }
 
     #[test]
