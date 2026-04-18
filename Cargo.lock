@@ -232,12 +232,38 @@ name = "dartboard"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "dartboard-core",
+ "dartboard-server",
  "emojis",
  "rand",
  "ratatui",
  "serde_json",
  "unicode-width",
  "unicode_names2",
+]
+
+[[package]]
+name = "dartboard-client-ws"
+version = "0.1.0"
+dependencies = [
+ "dartboard-core",
+]
+
+[[package]]
+name = "dartboard-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "unicode-width",
+]
+
+[[package]]
+name = "dartboard-server"
+version = "0.1.0"
+dependencies = [
+ "dartboard-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

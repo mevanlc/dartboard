@@ -1,0 +1,21 @@
+[package]
+name = "dartboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dartboard"
+path = "src/main.rs"
+
+[dependencies]
+dartboard-core.workspace = true
+dartboard-server.workspace = true
+
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["osc52"] }
+emojis = "0.7"
+serde_json.workspace = true
+unicode_names2 = "2"
+unicode-width.workspace = true
+rand = "0.8"
