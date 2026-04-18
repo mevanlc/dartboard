@@ -24,6 +24,13 @@ pub enum CanvasOp {
         x: usize,
         kind: ColShift,
     },
+    /// Replace the entire canvas. Used for large structural edits (undo /
+    /// redo, paste of big regions) where itemizing per-cell writes would be
+    /// more expensive than just shipping a snapshot. Safe on SP; WS plan
+    /// will want to avoid this path for high-frequency edits.
+    Replace {
+        canvas: Canvas,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +84,7 @@ impl Canvas {
                 ColShift::PullFromUp { to_y } => self.pull_from_up(*x, *to_y),
                 ColShift::PullFromDown { from_y } => self.pull_from_down(*x, *from_y),
             },
+            CanvasOp::Replace { canvas } => *self = canvas.clone(),
         }
     }
 }

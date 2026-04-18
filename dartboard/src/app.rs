@@ -7,7 +7,10 @@ use crossterm::{clipboard::CopyToClipboard, execute};
 use rand::seq::SliceRandom;
 use ratatui::layout::Rect;
 
-use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
+use dartboard_core::{
+    Canvas, CanvasOp, CellValue, Client, Pos, RgbColor, ServerMsg,
+};
+use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
 use crate::emoji;
 use crate::theme;
@@ -264,13 +267,16 @@ pub struct App {
     redo_stack: Vec<Canvas>,
     users: Vec<LocalUser>,
     active_user_idx: usize,
+    #[allow(dead_code)] // used by peer_count; wired into WS-mode undo gate in PLAN-MULTIPLAYER-WS-DEMO
+    server: ServerHandle,
+    clients: Vec<LocalClient>,
 }
 
 impl App {
     pub fn new() -> Self {
         let default_session = UserSession::default();
         let mut used_colors = Vec::with_capacity(LOCAL_USER_NAMES.len());
-        let users = LOCAL_USER_NAMES
+        let users: Vec<LocalUser> = LOCAL_USER_NAMES
             .iter()
             .map(|name| {
                 let color = random_available_user_color(&used_colors);
@@ -282,6 +288,21 @@ impl App {
                 }
             })
             .collect();
+
+        let server = ServerHandle::spawn_local(InMemStore::default());
+        let mut clients: Vec<LocalClient> = users
+            .iter()
+            .map(|u| {
+                server.connect_local(Hello {
+                    name: u.name.clone(),
+                    color: u.color,
+                })
+            })
+            .collect();
+        for client in &mut clients {
+            while client.try_recv().is_some() {}
+        }
+
         let current_session = default_session;
         Self {
             canvas: Canvas::new(),
@@ -311,6 +332,8 @@ impl App {
             redo_stack: Vec::new(),
             users,
             active_user_idx: 0,
+            server,
+            clients,
         }
     }
 
@@ -399,6 +422,30 @@ impl App {
                 self.undo_stack.remove(0);
             }
             self.redo_stack.clear();
+            self.submit_via_active(CanvasOp::Replace {
+                canvas: self.canvas.clone(),
+            });
+        }
+    }
+
+    fn submit_via_active(&mut self, op: CanvasOp) {
+        if let Some(client) = self.clients.get_mut(self.active_user_idx) {
+            client.submit_op(op);
+        }
+    }
+
+    #[allow(dead_code)] // wired into the WS-mode undo gate in PLAN-MULTIPLAYER-WS-DEMO
+    pub fn peer_count(&self) -> usize {
+        self.server.peer_count()
+    }
+
+    fn drain_server_events(&mut self) {
+        for i in 0..self.clients.len() {
+            while let Some(msg) = self.clients[i].try_recv() {
+                if let ServerMsg::OpBroadcast { op, .. } = msg {
+                    self.canvas.apply(&op);
+                }
+            }
         }
     }
 
@@ -408,6 +455,9 @@ impl App {
         };
         let current = std::mem::replace(&mut self.canvas, previous);
         self.redo_stack.push(current);
+        self.submit_via_active(CanvasOp::Replace {
+            canvas: self.canvas.clone(),
+        });
     }
 
     fn redo(&mut self) {
@@ -416,6 +466,9 @@ impl App {
         };
         let current = std::mem::replace(&mut self.canvas, next);
         self.undo_stack.push(current);
+        self.submit_via_active(CanvasOp::Replace {
+            canvas: self.canvas.clone(),
+        });
     }
 
     fn visible_bounds(&self) -> Bounds {
@@ -984,28 +1037,29 @@ impl App {
         let Some(floating) = self.floating.take() else {
             return;
         };
-        {
-            let pos = self.cursor;
-            let cb = &floating.clipboard;
-            let color = self.active_user_color();
-            for y in 0..cb.height {
-                for x in 0..cb.width {
+        let pos = self.cursor;
+        let transparent = floating.transparent;
+        let clipboard = floating.clipboard.clone();
+        let color = self.active_user_color();
+        self.apply_canvas_edit(|canvas| {
+            for y in 0..clipboard.height {
+                for x in 0..clipboard.width {
                     let tx = pos.x + x;
                     let ty = pos.y + y;
-                    if tx < self.canvas.width && ty < self.canvas.height {
+                    if tx < canvas.width && ty < canvas.height {
                         let target = Pos { x: tx, y: ty };
-                        match cb.get(x, y) {
+                        match clipboard.get(x, y) {
                             Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                                let _ = self.canvas.put_glyph_colored(target, ch, color);
+                                let _ = canvas.put_glyph_colored(target, ch, color);
                             }
                             Some(CellValue::WideCont) => {}
-                            None if !floating.transparent => self.canvas.clear(target),
+                            None if !transparent => canvas.clear(target),
                             None => {}
                         }
                     }
                 }
             }
-        }
+        });
         self.floating = Some(floating);
     }
 
@@ -1771,6 +1825,11 @@ impl App {
     }
 
     pub fn handle_event(&mut self, event: Event) {
+        self.handle_event_inner(event);
+        self.drain_server_events();
+    }
+
+    fn handle_event_inner(&mut self, event: Event) {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press && Self::is_open_picker_key(key) => {
                 self.open_emoji_picker();
@@ -2455,6 +2514,38 @@ mod tests {
                 "duplicate player color at index {idx}: {color:?}"
             );
         }
+    }
+
+    #[test]
+    fn paint_reaches_server_via_active_client() {
+        let mut app = App::new();
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'A');
+        let server_snap = app.server.canvas_snapshot();
+        assert_eq!(server_snap.get(Pos { x: 0, y: 0 }), 'A');
+    }
+
+    #[test]
+    fn undo_propagates_to_server() {
+        let mut app = App::new();
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert_eq!(app.server.canvas_snapshot().get(Pos { x: 0, y: 0 }), 'A');
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        app.drain_server_events();
+        assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), ' ');
+        assert_eq!(app.server.canvas_snapshot().get(Pos { x: 0, y: 0 }), ' ');
+    }
+
+    #[test]
+    fn each_local_user_has_its_own_client_user_id() {
+        let app = App::new();
+        let ids: Vec<_> = app.clients.iter().map(|c| c.user_id()).collect();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len(), "user ids must be distinct");
+        assert_eq!(ids.len(), app.users().len());
     }
 
     #[test]
