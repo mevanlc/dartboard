@@ -15,6 +15,7 @@ use dartboard_core::{
 };
 
 pub mod store;
+mod ws;
 
 pub use store::{CanvasStore, InMemStore};
 
@@ -39,7 +40,21 @@ struct State {
 
 struct ClientEntry {
     peer: Peer,
-    sender: mpsc::Sender<ServerMsg>,
+    sender: EntrySender,
+}
+
+enum EntrySender {
+    Local(mpsc::Sender<ServerMsg>),
+    Ws(tokio::sync::mpsc::UnboundedSender<ServerMsg>),
+}
+
+impl EntrySender {
+    fn send(&self, msg: ServerMsg) -> bool {
+        match self {
+            Self::Local(s) => s.send(msg).is_ok(),
+            Self::Ws(s) => s.send(msg).is_ok(),
+        }
+    }
 }
 
 /// Introductory payload a client sends before any ops. Name + color are
@@ -67,6 +82,19 @@ impl ServerHandle {
 
     pub fn connect_local(&self, hello: Hello) -> LocalClient {
         let (tx, rx) = mpsc::channel();
+        let user_id = self.register(hello, EntrySender::Local(tx));
+        LocalClient {
+            server: self.clone(),
+            user_id,
+            rx,
+            next_client_op_id: 1,
+        }
+    }
+
+    /// Register a new client with an already-constructed sender. Used by the
+    /// WS listener to hand a tokio mpsc sender in; [`connect_local`] is a thin
+    /// wrapper for the std-mpsc case.
+    pub(crate) fn register(&self, hello: Hello, sender: EntrySender) -> UserId {
         let mut state = self.inner.state.lock().unwrap();
         let user_id = state.next_user_id;
         state.next_user_id += 1;
@@ -77,30 +105,20 @@ impl ServerHandle {
             color: hello.color,
         };
 
-        let welcome = ServerMsg::Welcome {
+        sender.send(ServerMsg::Welcome {
             your_user_id: user_id,
             peers: state.clients.iter().map(|c| c.peer.clone()).collect(),
             snapshot: state.canvas.clone(),
-        };
-        let _ = tx.send(welcome);
+        });
 
         for entry in &state.clients {
-            let _ = entry.sender.send(ServerMsg::PeerJoined {
+            entry.sender.send(ServerMsg::PeerJoined {
                 peer: peer.clone(),
             });
         }
 
-        state.clients.push(ClientEntry {
-            peer,
-            sender: tx.clone(),
-        });
-
-        LocalClient {
-            server: self.clone(),
-            user_id,
-            rx,
-            next_client_op_id: 1,
-        }
+        state.clients.push(ClientEntry { peer, sender });
+        user_id
     }
 
     pub fn peer_count(&self) -> usize {
@@ -111,7 +129,56 @@ impl ServerHandle {
         self.inner.state.lock().unwrap().canvas.clone()
     }
 
-    fn submit_op(&self, user_id: UserId, client_op_id: ClientOpId, op: CanvasOp) {
+    /// Bind a TCP listener on `addr`, spawn a dedicated tokio runtime thread,
+    /// and accept WebSocket connections. Each accepted connection talks the
+    /// same [`ClientMsg`]/[`ServerMsg`] protocol as [`LocalClient`], framed as
+    /// JSON over ws frames.
+    ///
+    /// Blocks only for the initial bind; returns once the listener is live.
+    /// The accept loop runs until the process exits.
+    pub fn bind_ws(&self, addr: std::net::SocketAddr) -> std::io::Result<()> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let server = self.clone();
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(listener) => {
+                        let _ = ready_tx.send(Ok(()));
+                        loop {
+                            let Ok((stream, _)) = listener.accept().await else {
+                                break;
+                            };
+                            let server = server.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = ws::accept_and_run(server, stream).await {
+                                    eprintln!("ws connection ended: {}", e);
+                                }
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                    }
+                }
+            });
+        });
+
+        ready_rx
+            .recv()
+            .unwrap_or_else(|_| Err(std::io::Error::other("ws thread disappeared")))
+    }
+
+    pub(crate) fn submit_op(&self, user_id: UserId, client_op_id: ClientOpId, op: CanvasOp) {
         let mut state = self.inner.state.lock().unwrap();
 
         let State {
@@ -129,9 +196,9 @@ impl ServerHandle {
 
         for entry in clients.iter() {
             if entry.peer.user_id == user_id {
-                let _ = entry.sender.send(ServerMsg::Ack { client_op_id, seq });
+                entry.sender.send(ServerMsg::Ack { client_op_id, seq });
             }
-            let _ = entry.sender.send(ServerMsg::OpBroadcast {
+            entry.sender.send(ServerMsg::OpBroadcast {
                 from: user_id,
                 op: op.clone(),
                 seq,
@@ -139,11 +206,11 @@ impl ServerHandle {
         }
     }
 
-    fn disconnect(&self, user_id: UserId) {
+    pub(crate) fn disconnect(&self, user_id: UserId) {
         let mut state = self.inner.state.lock().unwrap();
         state.clients.retain(|c| c.peer.user_id != user_id);
         for entry in &state.clients {
-            let _ = entry.sender.send(ServerMsg::PeerLeft { user_id });
+            entry.sender.send(ServerMsg::PeerLeft { user_id });
         }
     }
 }

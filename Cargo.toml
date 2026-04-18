@@ -20,3 +20,6 @@ dartboard-client-ws = { path = "dartboard-client-ws" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-width = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "io-util", "time"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

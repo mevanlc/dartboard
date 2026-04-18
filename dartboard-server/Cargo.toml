@@ -8,3 +8,9 @@ license.workspace = true
 dartboard-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+dartboard-client-ws.workspace = true
