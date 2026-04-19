@@ -615,6 +615,7 @@ impl App {
                     match msg {
                         ServerMsg::Welcome {
                             your_user_id,
+                            your_color,
                             peers: initial_peers,
                             snapshot,
                         } => {
@@ -622,6 +623,7 @@ impl App {
                             *peers = initial_peers.clone();
                             self.canvas = snapshot;
                             self.users.truncate(1);
+                            self.users[0].color = your_color;
                             for p in initial_peers {
                                 self.users.push(LocalUser {
                                     name: p.name,

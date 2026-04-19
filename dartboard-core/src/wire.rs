@@ -31,6 +31,7 @@ pub enum ClientMsg {
 pub enum ServerMsg {
     Welcome {
         your_user_id: UserId,
+        your_color: RgbColor,
         peers: Vec<Peer>,
         snapshot: Canvas,
     },

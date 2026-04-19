@@ -19,6 +19,31 @@ mod ws;
 
 pub use store::{CanvasStore, InMemStore};
 
+/// Candidate colors offered to joining users whose requested color collides
+/// with one already in use. Kept in sync with the client-side palette in
+/// `dartboard/src/theme.rs`.
+const PLAYER_PALETTE: [RgbColor; 8] = [
+    RgbColor::new(255, 110, 64),
+    RgbColor::new(255, 196, 64),
+    RgbColor::new(145, 226, 88),
+    RgbColor::new(72, 220, 170),
+    RgbColor::new(84, 196, 255),
+    RgbColor::new(128, 163, 255),
+    RgbColor::new(192, 132, 255),
+    RgbColor::new(255, 124, 196),
+];
+
+fn resolve_user_color(requested: RgbColor, used: &[RgbColor]) -> RgbColor {
+    if !used.contains(&requested) {
+        return requested;
+    }
+    PLAYER_PALETTE
+        .iter()
+        .copied()
+        .find(|c| !used.contains(c))
+        .unwrap_or(requested)
+}
+
 /// A handle to the running server. Cloneable; every clone references the same
 /// canonical canvas and client registry.
 #[derive(Clone)]
@@ -99,14 +124,18 @@ impl ServerHandle {
         let user_id = state.next_user_id;
         state.next_user_id += 1;
 
+        let used_colors: Vec<RgbColor> = state.clients.iter().map(|c| c.peer.color).collect();
+        let color = resolve_user_color(hello.color, &used_colors);
+
         let peer = Peer {
             user_id,
             name: hello.name,
-            color: hello.color,
+            color,
         };
 
         sender.send(ServerMsg::Welcome {
             your_user_id: user_id,
+            your_color: color,
             peers: state.clients.iter().map(|c| c.peer.clone()).collect(),
             snapshot: state.canvas.clone(),
         });
@@ -401,6 +430,36 @@ mod tests {
         let snap = server.canvas_snapshot();
         assert_eq!(snap.get(Pos { x: 0, y: 0 }), 'B');
         assert_eq!(snap.get(Pos { x: 1, y: 0 }), ' ');
+    }
+
+    #[test]
+    fn colliding_color_gets_remapped_to_unused_palette_entry() {
+        let server = ServerHandle::spawn_local(InMemStore);
+        let mut alice = server.connect_local(Hello {
+            name: "alice".into(),
+            color: red(),
+        });
+        let mut bob = server.connect_local(Hello {
+            name: "bob".into(),
+            color: red(),
+        });
+
+        let alice_color = match drain_events(&mut alice).into_iter().next() {
+            Some(ServerMsg::Welcome { your_color, .. }) => your_color,
+            other => panic!("expected Welcome, got {:?}", other),
+        };
+        assert_eq!(alice_color, red());
+
+        let bob_color = match drain_events(&mut bob).into_iter().next() {
+            Some(ServerMsg::Welcome { your_color, .. }) => your_color,
+            other => panic!("expected Welcome, got {:?}", other),
+        };
+        assert_ne!(bob_color, red(), "bob should not have kept the colliding color");
+        assert!(
+            PLAYER_PALETTE.contains(&bob_color),
+            "remapped color {:?} should come from the palette",
+            bob_color
+        );
     }
 
     #[test]
