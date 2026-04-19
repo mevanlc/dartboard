@@ -728,41 +728,50 @@ impl App {
     }
 
     fn move_left(&mut self) {
-        let bounds = self.visible_bounds();
-        if self.cursor.x > bounds.min_x {
-            self.cursor.x -= 1;
-        } else if self.cursor.y > bounds.min_y {
-            self.cursor.y -= 1;
-            self.cursor.x = bounds.max_x;
+        if self.cursor.x == 0 {
+            return;
         }
+        self.cursor.x -= 1;
+        self.scroll_viewport_to_cursor();
     }
 
     fn move_right(&mut self) {
-        let bounds = self.visible_bounds();
-        if self.cursor.x < bounds.max_x {
-            self.cursor.x += 1;
-        } else if self.cursor.y < bounds.max_y {
-            self.cursor.y += 1;
-            self.cursor.x = bounds.min_x;
+        if self.cursor.x + 1 >= self.canvas.width {
+            return;
         }
+        self.cursor.x += 1;
+        self.scroll_viewport_to_cursor();
     }
 
     fn move_up(&mut self) {
-        let bounds = self.visible_bounds();
-        if self.cursor.y > bounds.min_y {
-            self.cursor.y -= 1;
-        } else {
-            self.cursor.y = bounds.max_y;
+        if self.cursor.y == 0 {
+            return;
         }
+        self.cursor.y -= 1;
+        self.scroll_viewport_to_cursor();
     }
 
     fn move_down(&mut self) {
-        let bounds = self.visible_bounds();
-        if self.cursor.y < bounds.max_y {
-            self.cursor.y += 1;
-        } else {
-            self.cursor.y = bounds.min_y;
+        if self.cursor.y + 1 >= self.canvas.height {
+            return;
         }
+        self.cursor.y += 1;
+        self.scroll_viewport_to_cursor();
+    }
+
+    fn scroll_viewport_to_cursor(&mut self) {
+        let bounds = self.visible_bounds();
+        if self.cursor.x < bounds.min_x {
+            self.viewport_origin.x -= bounds.min_x - self.cursor.x;
+        } else if self.cursor.x > bounds.max_x {
+            self.viewport_origin.x += self.cursor.x - bounds.max_x;
+        }
+        if self.cursor.y < bounds.min_y {
+            self.viewport_origin.y -= bounds.min_y - self.cursor.y;
+        } else if self.cursor.y > bounds.max_y {
+            self.viewport_origin.y += self.cursor.y - bounds.max_y;
+        }
+        self.clamp_viewport_origin();
     }
 
     fn mouse_to_canvas(&self, col: u16, row: u16) -> Option<Pos> {
@@ -2001,6 +2010,27 @@ impl App {
     }
 
     fn handle_control_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            match key.code {
+                KeyCode::Left => {
+                    self.pan_by(-1, 0);
+                    return true;
+                }
+                KeyCode::Right => {
+                    self.pan_by(1, 0);
+                    return true;
+                }
+                KeyCode::Up => {
+                    self.pan_by(0, -1);
+                    return true;
+                }
+                KeyCode::Down => {
+                    self.pan_by(0, 1);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Backspace | KeyCode::Char('h') => self.push_left(),
             KeyCode::Char('j') => self.push_down(),
@@ -2251,26 +2281,24 @@ impl App {
                     return;
                 }
                 KeyCode::Up if !ctrl && !alt => {
-                    self.cursor.y = self.cursor.y.saturating_sub(1);
+                    self.move_up();
                     return;
                 }
                 KeyCode::Down if !ctrl && !alt => {
-                    if self.cursor.y < self.canvas.height.saturating_sub(1) {
-                        self.cursor.y += 1;
-                    }
+                    self.move_down();
                     return;
                 }
                 KeyCode::Left if !ctrl && !alt => {
-                    self.cursor.x = self.cursor.x.saturating_sub(1);
+                    self.move_left();
                     return;
                 }
                 KeyCode::Right if !ctrl && !alt => {
-                    if self.cursor.x < self.canvas.width.saturating_sub(1) {
-                        self.cursor.x += 1;
-                    }
+                    self.move_right();
                     return;
                 }
                 _ if alt => {} // Keep floating, let alt handler process (e.g. panning)
+                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                    if ctrl && key.modifiers.contains(KeyModifiers::SHIFT) => {}
                 _ => {
                     self.dismiss_floating();
                 }
@@ -2575,6 +2603,20 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_arrow_keys_pan_viewport() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 10, 5));
+        app.cursor = Pos { x: 5, y: 2 };
+
+        let mods = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        app.handle_key(KeyEvent::new(KeyCode::Right, mods));
+        app.handle_key(KeyEvent::new(KeyCode::Down, mods));
+
+        assert_eq!(app.viewport_origin, Pos { x: 1, y: 1 });
+        assert_eq!(app.cursor, Pos { x: 5, y: 2 });
+    }
+
+    #[test]
     fn right_drag_pans_viewport() {
         let mut app = App::new();
         app.set_viewport(Rect::new(0, 0, 10, 5));
@@ -2628,18 +2670,64 @@ mod tests {
     }
 
     #[test]
-    fn cursor_movement_wraps_within_visible_bounds() {
+    fn cursor_movement_pans_viewport_at_edge() {
         let mut app = App::new();
         app.viewport_origin = Pos { x: 10, y: 20 };
         app.set_viewport(Rect::new(0, 0, 4, 3));
         app.cursor = Pos { x: 13, y: 20 };
 
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(app.cursor, Pos { x: 10, y: 21 });
+        assert_eq!(app.cursor, Pos { x: 14, y: 20 });
+        assert_eq!(app.viewport_origin, Pos { x: 11, y: 20 });
 
-        app.cursor = Pos { x: 10, y: 22 };
+        app.cursor = Pos { x: 14, y: 22 };
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.cursor, Pos { x: 10, y: 20 });
+        assert_eq!(app.cursor, Pos { x: 14, y: 23 });
+        assert_eq!(app.viewport_origin, Pos { x: 11, y: 21 });
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.cursor, Pos { x: 13, y: 23 });
+        assert_eq!(app.viewport_origin, Pos { x: 11, y: 21 });
+
+        app.cursor = Pos { x: 11, y: 23 };
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.cursor, Pos { x: 10, y: 23 });
+        assert_eq!(app.viewport_origin, Pos { x: 10, y: 21 });
+    }
+
+    #[test]
+    fn cursor_stops_at_canvas_edges() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 10, 5));
+
+        app.cursor = Pos { x: 0, y: 3 };
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.cursor, Pos { x: 0, y: 3 });
+        assert_eq!(app.viewport_origin, Pos { x: 0, y: 0 });
+
+        app.cursor = Pos { x: 3, y: 0 };
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.cursor, Pos { x: 3, y: 0 });
+        assert_eq!(app.viewport_origin, Pos { x: 0, y: 0 });
+
+        let last_x = app.canvas.width - 1;
+        let last_y = app.canvas.height - 1;
+
+        app.cursor = Pos { x: last_x, y: 3 };
+        app.viewport_origin = Pos {
+            x: last_x + 1 - app.viewport.width as usize,
+            y: 0,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.cursor, Pos { x: last_x, y: 3 });
+
+        app.cursor = Pos { x: 3, y: last_y };
+        app.viewport_origin = Pos {
+            x: 0,
+            y: last_y + 1 - app.viewport.height as usize,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.cursor, Pos { x: 3, y: last_y });
     }
 
     #[test]

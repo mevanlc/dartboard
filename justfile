@@ -32,7 +32,7 @@ clean:
 run *ARGS:
     cargo run --bin dartboard -- {{ARGS}}
 
-# Run the headless server binary, e.g. `just serve 127.0.0.1:8080`.
+# Run the headless server binary, e.g. `just serve 127.0.0.1:9199`.
 serve *ARGS:
     cargo run --bin dartboardd -- {{ARGS}}
 

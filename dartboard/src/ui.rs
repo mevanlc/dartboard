@@ -658,7 +658,7 @@ fn render_help_common(frame: &mut Frame, area: Rect) {
         ("backspace", "erase backward"),
         ("delete", "erase at cursor"),
         ("arrows", "move cursor"),
-        ("alt+arrows", "pan viewport"),
+        ("alt+arrows / ^⇧+arrows", "pan viewport"),
         ("home / end", "left / right edge"),
         ("pgup / pgdn", "top / bottom edge"),
         ("enter", "move down"),
