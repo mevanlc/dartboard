@@ -246,6 +246,7 @@ dependencies = [
  "crossterm",
  "dartboard-client-ws",
  "dartboard-core",
+ "dartboard-editor",
  "dartboard-server",
  "dartboard-tui",
  "emojis",
@@ -275,6 +276,13 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-width",
+]
+
+[[package]]
+name = "dartboard-editor"
+version = "0.1.0"
+dependencies = [
+ "dartboard-core",
 ]
 
 [[package]]

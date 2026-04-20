@@ -8,8 +8,12 @@ use ratatui::layout::Rect;
 
 use dartboard_client_ws::WebsocketClient;
 use dartboard_core::{
-    ops::CellWrite, Canvas, CanvasOp, CellValue, Client, ClientOpId, Peer, Pos, RgbColor,
-    ServerMsg, UserId,
+    Canvas, CanvasOp, CellValue, Client, ClientOpId, Peer, Pos, RgbColor, ServerMsg, UserId,
+};
+use dartboard_editor::{diff_canvas_op as editor_diff_canvas_op, Bounds};
+pub use dartboard_editor::{
+    Clipboard, EditorSession, FloatingSelection, HostEffect, Mode, PanDrag, Selection,
+    SelectionShape, Swatch, SWATCH_CAPACITY, Viewport,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
@@ -23,7 +27,6 @@ pub use crate::input::{
 use crate::theme;
 
 const UNDO_DEPTH_CAP: usize = 500;
-pub const SWATCH_CAPACITY: usize = 5;
 
 /// The transport backing a single dartboard session. Embedded runs a
 /// ServerHandle in-process with one LocalClient per local user; Remote
@@ -61,149 +64,10 @@ impl Client for ClientBox {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostEffect {
-    RequestQuit,
-    CopyToClipboard(String),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwatchZone {
     Body,
     Pin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Draw,
-    Select,
-}
-
-impl Mode {
-    pub fn is_selecting(self) -> bool {
-        matches!(self, Mode::Select)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SelectionShape {
-    #[default]
-    Rect,
-    Ellipse,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Selection {
-    pub anchor: Pos,
-    pub cursor: Pos,
-    pub shape: SelectionShape,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Bounds {
-    min_x: usize,
-    max_x: usize,
-    min_y: usize,
-    max_y: usize,
-}
-
-impl Bounds {
-    fn from_points(a: Pos, b: Pos) -> Self {
-        Self {
-            min_x: a.x.min(b.x),
-            max_x: a.x.max(b.x),
-            min_y: a.y.min(b.y),
-            max_y: a.y.max(b.y),
-        }
-    }
-
-    fn single(pos: Pos) -> Self {
-        Self::from_points(pos, pos)
-    }
-
-    fn width(self) -> usize {
-        self.max_x - self.min_x + 1
-    }
-
-    fn height(self) -> usize {
-        self.max_y - self.min_y + 1
-    }
-
-    fn normalized_for_canvas(self, canvas: &Canvas) -> Self {
-        let mut bounds = self;
-        for y in self.min_y..=self.max_y {
-            if bounds.min_x > 0 && canvas.is_continuation(Pos { x: bounds.min_x, y }) {
-                bounds.min_x -= 1;
-            }
-            if matches!(
-                canvas.cell(Pos { x: bounds.max_x, y }),
-                Some(CellValue::Wide(_))
-            ) && bounds.max_x + 1 < canvas.width
-            {
-                bounds.max_x += 1;
-            }
-        }
-        bounds
-    }
-}
-
-impl Selection {
-    fn bounds(self) -> Bounds {
-        Bounds::from_points(self.anchor, self.cursor)
-    }
-
-    fn contains(self, pos: Pos) -> bool {
-        let bounds = self.bounds();
-        if pos.x < bounds.min_x
-            || pos.x > bounds.max_x
-            || pos.y < bounds.min_y
-            || pos.y > bounds.max_y
-        {
-            return false;
-        }
-
-        match self.shape {
-            SelectionShape::Rect => true,
-            SelectionShape::Ellipse => {
-                if bounds.width() <= 1 || bounds.height() <= 1 {
-                    return true;
-                }
-
-                let px = pos.x as f64 + 0.5;
-                let py = pos.y as f64 + 0.5;
-                let cx = (bounds.min_x + bounds.max_x + 1) as f64 / 2.0;
-                let cy = (bounds.min_y + bounds.max_y + 1) as f64 / 2.0;
-                let rx = bounds.width() as f64 / 2.0;
-                let ry = bounds.height() as f64 / 2.0;
-                let dx = (px - cx) / rx;
-                let dy = (py - cy) / ry;
-                dx * dx + dy * dy <= 1.0
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Clipboard {
-    pub width: usize,
-    pub height: usize,
-    cells: Vec<Option<CellValue>>,
-}
-
-impl Clipboard {
-    pub fn get(&self, x: usize, y: usize) -> Option<CellValue> {
-        self.cells[y * self.width + x]
-    }
-
-    pub fn cells(&self) -> &[Option<CellValue>] {
-        &self.cells
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Swatch {
-    pub clipboard: Clipboard,
-    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -223,60 +87,24 @@ impl HelpTab {
 }
 
 #[derive(Debug, Clone)]
-pub struct FloatingSelection {
-    pub clipboard: Clipboard,
-    pub transparent: bool,
-    pub source_index: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PanDrag {
-    col: u16,
-    row: u16,
-    origin: Pos,
-}
-
-#[derive(Debug, Clone)]
 struct UserSession {
-    cursor: Pos,
-    mode: Mode,
+    editor: EditorSession,
     show_help: bool,
     help_tab: HelpTab,
     emoji_picker_open: bool,
-    viewport: Rect,
-    viewport_origin: Pos,
-    selection_anchor: Option<Pos>,
-    selection_shape: SelectionShape,
-    drag_origin: Option<Pos>,
-    pan_drag: Option<PanDrag>,
-    swatches: [Option<Swatch>; SWATCH_CAPACITY],
-    floating: Option<FloatingSelection>,
     emoji_picker_state: emoji::EmojiPickerState,
     paint_canvas_before: Option<Canvas>,
-    paint_stroke_anchor: Option<Pos>,
-    paint_stroke_last: Option<Pos>,
 }
 
 impl Default for UserSession {
     fn default() -> Self {
         Self {
-            cursor: Pos { x: 0, y: 0 },
-            mode: Mode::Draw,
+            editor: EditorSession::default(),
             show_help: false,
             help_tab: HelpTab::default(),
             emoji_picker_open: false,
-            viewport: Rect::default(),
-            viewport_origin: Pos { x: 0, y: 0 },
-            selection_anchor: None,
-            selection_shape: SelectionShape::Rect,
-            drag_origin: None,
-            pan_drag: None,
-            swatches: Default::default(),
-            floating: None,
             emoji_picker_state: emoji::EmojiPickerState::default(),
             paint_canvas_before: None,
-            paint_stroke_anchor: None,
-            paint_stroke_last: None,
         }
     }
 }
@@ -320,6 +148,19 @@ pub struct App {
 }
 
 impl App {
+    fn viewport_to_editor(viewport: Rect) -> Viewport {
+        Viewport {
+            x: viewport.x,
+            y: viewport.y,
+            width: viewport.width,
+            height: viewport.height,
+        }
+    }
+
+    fn viewport_from_editor(viewport: Viewport) -> Rect {
+        Rect::new(viewport.x, viewport.y, viewport.width, viewport.height)
+    }
+
     pub fn new() -> Self {
         let default_session = UserSession::default();
         let users: Vec<LocalUser> = theme::PLAYER_PALETTE
@@ -349,28 +190,28 @@ impl App {
         let current_session = default_session;
         Self {
             canvas: Canvas::new(),
-            cursor: current_session.cursor,
-            mode: current_session.mode,
+            cursor: current_session.editor.cursor,
+            mode: current_session.editor.mode,
             should_quit: false,
             show_help: current_session.show_help,
             help_tab: current_session.help_tab,
             emoji_picker_open: current_session.emoji_picker_open,
-            viewport: current_session.viewport,
-            viewport_origin: current_session.viewport_origin,
-            selection_anchor: current_session.selection_anchor,
-            selection_shape: current_session.selection_shape,
-            drag_origin: current_session.drag_origin,
-            pan_drag: current_session.pan_drag,
-            swatches: current_session.swatches,
-            floating: current_session.floating,
+            viewport: Self::viewport_from_editor(current_session.editor.viewport),
+            viewport_origin: current_session.editor.viewport_origin,
+            selection_anchor: current_session.editor.selection_anchor,
+            selection_shape: current_session.editor.selection_shape,
+            drag_origin: current_session.editor.drag_origin,
+            pan_drag: current_session.editor.pan_drag,
+            swatches: current_session.editor.swatches,
+            floating: current_session.editor.floating,
             emoji_picker_state: current_session.emoji_picker_state,
             icon_catalog: None,
             swatch_body_hits: [None; SWATCH_CAPACITY],
             swatch_pin_hits: [None; SWATCH_CAPACITY],
             help_tab_hits: [None; 2],
             paint_canvas_before: current_session.paint_canvas_before,
-            paint_stroke_anchor: current_session.paint_stroke_anchor,
-            paint_stroke_last: current_session.paint_stroke_last,
+            paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
+            paint_stroke_last: current_session.editor.paint_stroke_last,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             users,
@@ -397,28 +238,28 @@ impl App {
         let current_session = default_session;
         let mut app = Self {
             canvas: Canvas::new(),
-            cursor: current_session.cursor,
-            mode: current_session.mode,
+            cursor: current_session.editor.cursor,
+            mode: current_session.editor.mode,
             should_quit: false,
             show_help: current_session.show_help,
             help_tab: current_session.help_tab,
             emoji_picker_open: current_session.emoji_picker_open,
-            viewport: current_session.viewport,
-            viewport_origin: current_session.viewport_origin,
-            selection_anchor: current_session.selection_anchor,
-            selection_shape: current_session.selection_shape,
-            drag_origin: current_session.drag_origin,
-            pan_drag: current_session.pan_drag,
-            swatches: current_session.swatches,
-            floating: current_session.floating,
+            viewport: Self::viewport_from_editor(current_session.editor.viewport),
+            viewport_origin: current_session.editor.viewport_origin,
+            selection_anchor: current_session.editor.selection_anchor,
+            selection_shape: current_session.editor.selection_shape,
+            drag_origin: current_session.editor.drag_origin,
+            pan_drag: current_session.editor.pan_drag,
+            swatches: current_session.editor.swatches,
+            floating: current_session.editor.floating,
             emoji_picker_state: current_session.emoji_picker_state,
             icon_catalog: None,
             swatch_body_hits: [None; SWATCH_CAPACITY],
             swatch_pin_hits: [None; SWATCH_CAPACITY],
             help_tab_hits: [None; 2],
             paint_canvas_before: current_session.paint_canvas_before,
-            paint_stroke_anchor: current_session.paint_stroke_anchor,
-            paint_stroke_last: current_session.paint_stroke_last,
+            paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
+            paint_stroke_last: current_session.editor.paint_stroke_last,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             users,
@@ -448,44 +289,46 @@ impl App {
 
     fn current_session(&self) -> UserSession {
         UserSession {
-            cursor: self.cursor,
-            mode: self.mode,
+            editor: EditorSession {
+                cursor: self.cursor,
+                mode: self.mode,
+                viewport: Self::viewport_to_editor(self.viewport),
+                viewport_origin: self.viewport_origin,
+                selection_anchor: self.selection_anchor,
+                selection_shape: self.selection_shape,
+                drag_origin: self.drag_origin,
+                pan_drag: self.pan_drag,
+                swatches: self.swatches.clone(),
+                floating: self.floating.clone(),
+                paint_stroke_anchor: self.paint_stroke_anchor,
+                paint_stroke_last: self.paint_stroke_last,
+            },
             show_help: self.show_help,
             help_tab: self.help_tab,
             emoji_picker_open: self.emoji_picker_open,
-            viewport: self.viewport,
-            viewport_origin: self.viewport_origin,
-            selection_anchor: self.selection_anchor,
-            selection_shape: self.selection_shape,
-            drag_origin: self.drag_origin,
-            pan_drag: self.pan_drag,
-            swatches: self.swatches.clone(),
-            floating: self.floating.clone(),
             emoji_picker_state: self.emoji_picker_state.clone(),
             paint_canvas_before: self.paint_canvas_before.clone(),
-            paint_stroke_anchor: self.paint_stroke_anchor,
-            paint_stroke_last: self.paint_stroke_last,
         }
     }
 
     fn load_session(&mut self, session: UserSession) {
-        self.cursor = session.cursor;
-        self.mode = session.mode;
+        self.cursor = session.editor.cursor;
+        self.mode = session.editor.mode;
         self.show_help = session.show_help;
         self.help_tab = session.help_tab;
         self.emoji_picker_open = session.emoji_picker_open;
-        self.viewport = session.viewport;
-        self.viewport_origin = session.viewport_origin;
-        self.selection_anchor = session.selection_anchor;
-        self.selection_shape = session.selection_shape;
-        self.drag_origin = session.drag_origin;
-        self.pan_drag = session.pan_drag;
-        self.swatches = session.swatches;
-        self.floating = session.floating;
+        self.viewport = Self::viewport_from_editor(session.editor.viewport);
+        self.viewport_origin = session.editor.viewport_origin;
+        self.selection_anchor = session.editor.selection_anchor;
+        self.selection_shape = session.editor.selection_shape;
+        self.drag_origin = session.editor.drag_origin;
+        self.pan_drag = session.editor.pan_drag;
+        self.swatches = session.editor.swatches;
+        self.floating = session.editor.floating;
         self.emoji_picker_state = session.emoji_picker_state;
         self.paint_canvas_before = session.paint_canvas_before;
-        self.paint_stroke_anchor = session.paint_stroke_anchor;
-        self.paint_stroke_last = session.paint_stroke_last;
+        self.paint_stroke_anchor = session.editor.paint_stroke_anchor;
+        self.paint_stroke_last = session.editor.paint_stroke_last;
         self.swatch_body_hits = [None; SWATCH_CAPACITY];
         self.swatch_pin_hits = [None; SWATCH_CAPACITY];
     }
@@ -1061,11 +904,7 @@ impl App {
                 cells.push(self.canvas.cell(Pos { x, y }));
             }
         }
-        Clipboard {
-            width: bounds.width(),
-            height: bounds.height(),
-            cells,
-        }
+        Clipboard::new(bounds.width(), bounds.height(), cells)
     }
 
     fn capture_selection(&self, selection: Selection) -> Clipboard {
@@ -1082,11 +921,7 @@ impl App {
                 cells.push(include.then(|| self.canvas.cell(pos)).flatten());
             }
         }
-        Clipboard {
-            width: bounds.width(),
-            height: bounds.height(),
-            cells,
-        }
+        Clipboard::new(bounds.width(), bounds.height(), cells)
     }
 
     fn copy_selection_or_cell(&mut self) {
@@ -2447,49 +2282,7 @@ fn swatch_home_row_index(ch: char) -> Option<usize> {
 }
 
 fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
-    use std::collections::HashSet;
-
-    let mut origins: HashSet<Pos> = HashSet::new();
-    for (pos, cell) in before.iter() {
-        if matches!(cell, CellValue::Narrow(_) | CellValue::Wide(_)) {
-            origins.insert(*pos);
-        }
-    }
-    for (pos, cell) in after.iter() {
-        if matches!(cell, CellValue::Narrow(_) | CellValue::Wide(_)) {
-            origins.insert(*pos);
-        }
-    }
-
-    let mut origins: Vec<Pos> = origins.into_iter().collect();
-    origins.sort_by_key(|p| (p.y, p.x));
-
-    let mut writes: Vec<CellWrite> = Vec::new();
-    for pos in origins {
-        let a_cell = after.cell(pos);
-        let b_cell = before.cell(pos);
-        let a_fg = after.fg(pos);
-        let b_fg = before.fg(pos);
-        if a_cell == b_cell && a_fg == b_fg {
-            continue;
-        }
-        match a_cell {
-            Some(CellValue::Narrow(ch)) | Some(CellValue::Wide(ch)) => {
-                let fg = a_fg.unwrap_or(theme::DEFAULT_GLYPH_FG);
-                writes.push(CellWrite::Paint { pos, ch, fg });
-            }
-            _ => writes.push(CellWrite::Clear { pos }),
-        }
-    }
-
-    match writes.len() {
-        0 => None,
-        1 => Some(match writes.remove(0) {
-            CellWrite::Paint { pos, ch, fg } => CanvasOp::PaintCell { pos, ch, fg },
-            CellWrite::Clear { pos } => CanvasOp::ClearCell { pos },
-        }),
-        _ => Some(CanvasOp::PaintRegion { cells: writes }),
-    }
+    editor_diff_canvas_op(before, after, theme::DEFAULT_GLYPH_FG)
 }
 
 #[cfg(test)]

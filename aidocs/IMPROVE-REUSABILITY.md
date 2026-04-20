@@ -46,6 +46,25 @@ This finishes the first half of the input-boundary cleanup:
 
 The remaining gap is a second adapter surface for hosts that do their own VT/input parsing.
 
+### `dartboard-editor`
+- New crossterm-free crate for reusable editor-facing types
+- Owns:
+  - host-neutral input types (`AppIntent`, `AppKey`, pointer types)
+  - reusable per-user editor session state (`EditorSession`, `Viewport`, `PanDrag`)
+  - editor model types (`Mode`, `Selection`, `Clipboard`, `Swatch`, `FloatingSelection`)
+  - `HostEffect`
+  - pure canvas diff helper used by editor/host layers
+
+This is the first real move toward a reusable editor crate:
+- `late-sh` can target a lower-level crate for input/effect/model types
+- `dartboard` now consumes those shared definitions instead of owning them all locally
+- standalone `App` now stores/restores per-user state through `EditorSession` instead of a fully local-only shape
+
+What it does not own yet:
+- command handling and mutation logic
+- canvas ownership and undo/redo orchestration
+- viewport/cursor/selection/swatches/floating behavior as a reusable command layer
+
 ### Explicit full-session handshake rejection
 - `ServerMsg::ConnectRejected`
 - server-side capacity gate
@@ -70,6 +89,10 @@ That means `late-sh` can integrate more cleanly than before, but it still has to
 ### 1. Extract a pure editor/session-state crate
 Suggested shape:
 - `dartboard-editor` or `dartboard-session`
+
+Current status:
+- `dartboard-editor` now exists and owns the reusable session model
+- the main remaining work is to move the state machine itself out of `dartboard/src/app.rs`
 
 It should own:
 - cursor
