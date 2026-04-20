@@ -4,7 +4,6 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::{clipboard::CopyToClipboard, execute};
-use rand::seq::SliceRandom;
 use ratatui::layout::Rect;
 
 use dartboard_client_ws::WebsocketClient;
@@ -61,13 +60,6 @@ pub enum SwatchZone {
     Body,
     Pin,
 }
-const LOCAL_USER_NAMES: &[&str] = &[
-    "mevanlc",
-    "mat",
-    "averylongusernamethatgetstruncated",
-    "Hades",
-    "graybeard",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -314,17 +306,13 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let default_session = UserSession::default();
-        let mut used_colors = Vec::with_capacity(LOCAL_USER_NAMES.len());
-        let users: Vec<LocalUser> = LOCAL_USER_NAMES
+        let users: Vec<LocalUser> = theme::PLAYER_PALETTE
             .iter()
-            .map(|name| {
-                let color = random_available_user_color(&used_colors);
-                used_colors.push(color);
-                LocalUser {
-                    name: (*name).to_string(),
-                    color,
-                    session: default_session.clone(),
-                }
+            .zip(theme::PLAYER_COLOR_NAMES.iter())
+            .map(|(color, name)| LocalUser {
+                name: (*name).to_string(),
+                color: *color,
+                session: default_session.clone(),
             })
             .collect();
 
@@ -521,6 +509,10 @@ impl App {
 
     pub fn active_user_color(&self) -> RgbColor {
         self.users[self.active_user_idx].color
+    }
+
+    pub fn is_embedded(&self) -> bool {
+        matches!(self.transport, Transport::Embedded { .. })
     }
 
     #[cfg(test)]
@@ -2446,19 +2438,6 @@ fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
         }),
         _ => Some(CanvasOp::PaintRegion { cells: writes }),
     }
-}
-
-fn random_available_user_color(used_colors: &[RgbColor]) -> RgbColor {
-    let mut rng = rand::thread_rng();
-    theme::PLAYER_PALETTE
-        .iter()
-        .copied()
-        .filter(|color| !used_colors.contains(color))
-        .collect::<Vec<_>>()
-        .choose(&mut rng)
-        .copied()
-        .or_else(|| theme::PLAYER_PALETTE.to_vec().choose(&mut rng).copied())
-        .unwrap_or(theme::DEFAULT_GLYPH_FG)
 }
 
 #[cfg(test)]

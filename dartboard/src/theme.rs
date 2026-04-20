@@ -22,6 +22,10 @@ pub const PLAYER_PALETTE: [RgbColor; 8] = [
     RgbColor::new(255, 124, 196),
 ];
 
+pub const PLAYER_COLOR_NAMES: [&str; 8] = [
+    "salmon", "amber", "lime", "mint", "sky", "indigo", "violet", "rose",
+];
+
 pub const DEFAULT_GLYPH_FG: RgbColor = RgbColor::new(136, 128, 120);
 
 pub const fn rat(c: RgbColor) -> Color {

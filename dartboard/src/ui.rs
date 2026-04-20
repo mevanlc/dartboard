@@ -123,7 +123,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     } else {
         let peers = app.peer_count();
-        if peers > 1 {
+        if !app.is_embedded() && peers > 1 {
             format!(
                 " {} help \u{00b7} {} glyphs \u{00b7} {} peers \u{00b7} {} quit ",
                 "^P", "^]", peers, "^Q"
@@ -491,14 +491,24 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
 
     frame.render_widget(Clear, panel);
 
-    let block = Block::default()
+    let title_text = if app.is_embedded() { " colors " } else { " users " };
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::ACCENT))
         .title(Span::styled(
-            " users ",
+            title_text,
             Style::default().fg(theme::HIGHLIGHT),
         ));
+    if app.is_embedded() && app.users().len() > 1 {
+        block = block.title(
+            Line::from(Span::styled(
+                " \u{21e5} ",
+                Style::default().fg(theme::ACCENT),
+            ))
+            .right_aligned(),
+        );
+    }
     frame.render_widget(block, panel);
 
     if inner.width == 0 || inner.height == 0 {
@@ -513,15 +523,7 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
             .enumerate()
             .map(|(idx, user)| {
                 let label = truncate_label(&user.name, max_name_width.saturating_sub(2));
-                let line = format!(
-                    "{} {}",
-                    if idx == app.active_user_index() {
-                        '▸'
-                    } else {
-                        ' '
-                    },
-                    label
-                );
+                let line = format!("  {}", label);
                 if idx == app.active_user_index() {
                     Line::from(Span::styled(
                         format!("{:<width$}", line, width = max_name_width),
