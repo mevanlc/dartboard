@@ -1,8 +1,3 @@
-mod app;
-mod emoji;
-mod theme;
-mod ui;
-
 use std::io::{self, Stdout};
 use std::net::SocketAddr;
 
@@ -14,13 +9,12 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use dartboard::{app::App, theme, ui};
 use dartboard_client_ws::{Hello, WebsocketClient};
 use dartboard_core::RgbColor;
 use dartboard_server::{InMemStore, ServerHandle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-
-use app::App;
 
 enum Mode {
     Embedded,

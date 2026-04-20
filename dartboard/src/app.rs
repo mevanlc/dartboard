@@ -1,7 +1,7 @@
 use std::io;
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::{clipboard::CopyToClipboard, execute};
 use ratatui::layout::Rect;
@@ -55,6 +55,168 @@ impl Client for ClientBox {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AppModifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub meta: bool,
+}
+
+impl AppModifiers {
+    fn from_crossterm(modifiers: KeyModifiers) -> Self {
+        Self {
+            ctrl: modifiers.contains(KeyModifiers::CONTROL),
+            alt: modifiers.contains(KeyModifiers::ALT),
+            shift: modifiers.contains(KeyModifiers::SHIFT),
+            meta: modifiers.contains(KeyModifiers::META),
+        }
+    }
+
+    fn has_alt_like(self) -> bool {
+        self.alt || self.meta
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppKeyCode {
+    Backspace,
+    Enter,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Tab,
+    BackTab,
+    Delete,
+    Esc,
+    F(u8),
+    Char(char),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppKey {
+    pub code: AppKeyCode,
+    pub modifiers: AppModifiers,
+}
+
+impl AppKey {
+    fn from_crossterm(key: KeyEvent) -> Option<Self> {
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+
+        let code = match key.code {
+            KeyCode::Backspace => AppKeyCode::Backspace,
+            KeyCode::Enter => AppKeyCode::Enter,
+            KeyCode::Left => AppKeyCode::Left,
+            KeyCode::Right => AppKeyCode::Right,
+            KeyCode::Up => AppKeyCode::Up,
+            KeyCode::Down => AppKeyCode::Down,
+            KeyCode::Home => AppKeyCode::Home,
+            KeyCode::End => AppKeyCode::End,
+            KeyCode::PageUp => AppKeyCode::PageUp,
+            KeyCode::PageDown => AppKeyCode::PageDown,
+            KeyCode::Tab => AppKeyCode::Tab,
+            KeyCode::BackTab => AppKeyCode::BackTab,
+            KeyCode::Delete => AppKeyCode::Delete,
+            KeyCode::Esc => AppKeyCode::Esc,
+            KeyCode::F(n) => AppKeyCode::F(n),
+            KeyCode::Char(ch) => AppKeyCode::Char(ch),
+            _ => return None,
+        };
+
+        Some(Self {
+            code,
+            modifiers: AppModifiers::from_crossterm(key.modifiers),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPointerButton {
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPointerKind {
+    Down(AppPointerButton),
+    Up(AppPointerButton),
+    Drag(AppPointerButton),
+    Moved,
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppPointerEvent {
+    pub column: u16,
+    pub row: u16,
+    pub kind: AppPointerKind,
+    pub modifiers: AppModifiers,
+}
+
+impl AppPointerEvent {
+    fn from_crossterm(mouse: MouseEvent) -> Option<Self> {
+        let kind = match mouse.kind {
+            MouseEventKind::Down(button) => AppPointerKind::Down(AppPointerButton::from(button)?),
+            MouseEventKind::Up(button) => AppPointerKind::Up(AppPointerButton::from(button)?),
+            MouseEventKind::Drag(button) => AppPointerKind::Drag(AppPointerButton::from(button)?),
+            MouseEventKind::Moved => AppPointerKind::Moved,
+            MouseEventKind::ScrollUp => AppPointerKind::ScrollUp,
+            MouseEventKind::ScrollDown => AppPointerKind::ScrollDown,
+            _ => return None,
+        };
+
+        Some(Self {
+            column: mouse.column,
+            row: mouse.row,
+            kind,
+            modifiers: AppModifiers::from_crossterm(mouse.modifiers),
+        })
+    }
+}
+
+impl AppPointerButton {
+    fn from(button: MouseButton) -> Option<Self> {
+        match button {
+            MouseButton::Left => Some(Self::Left),
+            MouseButton::Right => Some(Self::Right),
+            MouseButton::Middle => Some(Self::Middle),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppIntent {
+    KeyPress(AppKey),
+    Pointer(AppPointerEvent),
+    Paste(String),
+}
+
+impl AppIntent {
+    fn from_crossterm(event: Event) -> Option<Self> {
+        match event {
+            Event::Key(key) => AppKey::from_crossterm(key).map(Self::KeyPress),
+            Event::Mouse(mouse) => AppPointerEvent::from_crossterm(mouse).map(Self::Pointer),
+            Event::Paste(data) => Some(Self::Paste(data)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEffect {
+    RequestQuit,
+    CopyToClipboard(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwatchZone {
     Body,
@@ -74,7 +236,7 @@ impl Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum SelectionShape {
+pub enum SelectionShape {
     #[default]
     Rect,
     Ellipse,
@@ -84,7 +246,7 @@ enum SelectionShape {
 pub struct Selection {
     pub anchor: Pos,
     pub cursor: Pos,
-    shape: SelectionShape,
+    pub shape: SelectionShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +343,10 @@ pub struct Clipboard {
 impl Clipboard {
     pub fn get(&self, x: usize, y: usize) -> Option<CellValue> {
         self.cells[y * self.width + x]
+    }
+
+    pub fn cells(&self) -> &[Option<CellValue>] {
+        &self.cells
     }
 }
 
@@ -647,7 +813,9 @@ impl App {
                                 }
                             }
                         }
-                        ServerMsg::Ack { .. } | ServerMsg::Reject { .. } => {}
+                        ServerMsg::ConnectRejected { .. }
+                        | ServerMsg::Ack { .. }
+                        | ServerMsg::Reject { .. } => {}
                     }
                 }
             }
@@ -899,7 +1067,7 @@ impl App {
         self.mode = Mode::Draw;
     }
 
-    fn selection(&self) -> Option<Selection> {
+    pub fn selection(&self) -> Option<Selection> {
         self.selection_anchor.map(|anchor| Selection {
             anchor,
             cursor: self.cursor,
@@ -1134,9 +1302,8 @@ impl App {
         }
     }
 
-    fn copy_to_system_clipboard(&self) {
-        let text = self.export_system_clipboard_text();
-        let _ = execute!(io::stdout(), CopyToClipboard::to_clipboard_from(text));
+    fn copy_to_system_clipboard_effect(&self) -> HostEffect {
+        HostEffect::CopyToClipboard(self.export_system_clipboard_text())
     }
 
     fn cut_selection_or_cell(&mut self) {
@@ -1720,35 +1887,30 @@ impl App {
         }
     }
 
-    fn handle_picker_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key
-            .modifiers
-            .intersects(KeyModifiers::ALT | KeyModifiers::META);
-
-        if alt && key.code == KeyCode::Enter {
+    fn handle_picker_key(&mut self, key: AppKey) {
+        if key.modifiers.has_alt_like() && key.code == AppKeyCode::Enter {
             self.picker_insert_selected(true);
             return;
         }
 
         match key.code {
-            KeyCode::Esc => {
+            AppKeyCode::Esc => {
                 self.emoji_picker_open = false;
             }
-            KeyCode::Enter => self.picker_insert_selected(false),
-            KeyCode::Tab => {
+            AppKeyCode::Enter => self.picker_insert_selected(false),
+            AppKeyCode::Tab => {
                 self.emoji_picker_state.tab.move_next();
                 self.emoji_picker_state.selected_index = 0;
                 self.emoji_picker_state.scroll_offset = 0;
                 self.emoji_picker_state.last_click = None;
             }
-            KeyCode::BackTab => {
+            AppKeyCode::BackTab => {
                 self.emoji_picker_state.tab.move_prev();
                 self.emoji_picker_state.selected_index = 0;
                 self.emoji_picker_state.scroll_offset = 0;
                 self.emoji_picker_state.last_click = None;
             }
-            KeyCode::Backspace => {
+            AppKeyCode::Backspace => {
                 if self.emoji_picker_state.search_cursor > 0 {
                     let byte_pos = self
                         .emoji_picker_state
@@ -1763,27 +1925,29 @@ impl App {
                     self.emoji_picker_state.scroll_offset = 0;
                 }
             }
-            KeyCode::Left => {
+            AppKeyCode::Left => {
                 self.emoji_picker_state.search_cursor =
                     self.emoji_picker_state.search_cursor.saturating_sub(1);
             }
-            KeyCode::Right => {
+            AppKeyCode::Right => {
                 let len = self.emoji_picker_state.search_query.chars().count();
                 if self.emoji_picker_state.search_cursor < len {
                     self.emoji_picker_state.search_cursor += 1;
                 }
             }
-            KeyCode::Up => self.picker_move_selection(-1),
-            KeyCode::Down => self.picker_move_selection(1),
-            KeyCode::PageUp => {
+            AppKeyCode::Up => self.picker_move_selection(-1),
+            AppKeyCode::Down => self.picker_move_selection(1),
+            AppKeyCode::PageUp => {
                 let page = self.emoji_picker_state.visible_height.get().max(1) as isize;
                 self.picker_move_selection(-page);
             }
-            KeyCode::PageDown => {
+            AppKeyCode::PageDown => {
                 let page = self.emoji_picker_state.visible_height.get().max(1) as isize;
                 self.picker_move_selection(page);
             }
-            KeyCode::Char(ch) if !ctrl && !alt && !ch.is_control() => {
+            AppKeyCode::Char(ch)
+                if !key.modifiers.ctrl && !key.modifiers.has_alt_like() && !ch.is_control() =>
+            {
                 let byte_pos = self
                     .emoji_picker_state
                     .search_query
@@ -1800,9 +1964,9 @@ impl App {
         }
     }
 
-    fn handle_picker_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+    fn handle_picker_mouse(&mut self, mouse: AppPointerEvent) {
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
+            AppPointerKind::Down(AppPointerButton::Left) => {
                 let row_0based = mouse.row;
                 let col_0based = mouse.column;
 
@@ -1853,8 +2017,8 @@ impl App {
                     self.emoji_picker_state.last_click = Some((now, selectable_idx));
                 }
             }
-            MouseEventKind::ScrollDown => self.picker_move_selection(3),
-            MouseEventKind::ScrollUp => self.picker_move_selection(-3),
+            AppPointerKind::ScrollDown => self.picker_move_selection(3),
+            AppPointerKind::ScrollUp => self.picker_move_selection(-3),
             _ => {}
         }
     }
@@ -2003,22 +2167,22 @@ impl App {
         true
     }
 
-    fn handle_control_key(&mut self, key: KeyEvent) -> bool {
-        if key.modifiers.contains(KeyModifiers::SHIFT) {
+    fn handle_control_key(&mut self, key: AppKey) -> bool {
+        if key.modifiers.shift {
             match key.code {
-                KeyCode::Left => {
+                AppKeyCode::Left => {
                     self.pan_by(-1, 0);
                     return true;
                 }
-                KeyCode::Right => {
+                AppKeyCode::Right => {
                     self.pan_by(1, 0);
                     return true;
                 }
-                KeyCode::Up => {
+                AppKeyCode::Up => {
                     self.pan_by(0, -1);
                     return true;
                 }
-                KeyCode::Down => {
+                AppKeyCode::Down => {
                     self.pan_by(0, 1);
                     return true;
                 }
@@ -2026,23 +2190,23 @@ impl App {
             }
         }
         match key.code {
-            KeyCode::Backspace | KeyCode::Char('h') => self.push_left(),
-            KeyCode::Char('j') => self.push_down(),
-            KeyCode::Char('k') => self.push_up(),
-            KeyCode::Char('l') => self.push_right(),
-            KeyCode::Char('y') => self.pull_from_left(),
-            KeyCode::Char('u') => self.pull_from_down(),
-            KeyCode::Tab | KeyCode::Char('i') => self.pull_from_up(),
-            KeyCode::Char('o') => self.pull_from_right(),
-            KeyCode::Char('c') => self.copy_selection_or_cell(),
-            KeyCode::Char('x') => self.cut_selection_or_cell(),
-            KeyCode::Char('v') => self.paste_clipboard(),
-            KeyCode::Char('b') => self.draw_border(),
-            KeyCode::Char('r') => self.redo(),
-            KeyCode::Char('t') => return self.transpose_selection_corner(),
-            KeyCode::Char('z') => self.undo(),
-            KeyCode::Char(' ') | KeyCode::Null => self.smart_fill(),
-            KeyCode::Char(ch) if swatch_home_row_index(ch).is_some() => {
+            AppKeyCode::Backspace | AppKeyCode::Char('h') => self.push_left(),
+            AppKeyCode::Char('j') => self.push_down(),
+            AppKeyCode::Char('k') => self.push_up(),
+            AppKeyCode::Char('l') => self.push_right(),
+            AppKeyCode::Char('y') => self.pull_from_left(),
+            AppKeyCode::Char('u') => self.pull_from_down(),
+            AppKeyCode::Tab | AppKeyCode::Char('i') => self.pull_from_up(),
+            AppKeyCode::Char('o') => self.pull_from_right(),
+            AppKeyCode::Char('c') => self.copy_selection_or_cell(),
+            AppKeyCode::Char('x') => self.cut_selection_or_cell(),
+            AppKeyCode::Char('v') => self.paste_clipboard(),
+            AppKeyCode::Char('b') => self.draw_border(),
+            AppKeyCode::Char('r') => self.redo(),
+            AppKeyCode::Char('t') => return self.transpose_selection_corner(),
+            AppKeyCode::Char('z') => self.undo(),
+            AppKeyCode::Char(' ') => self.smart_fill(),
+            AppKeyCode::Char(ch) if swatch_home_row_index(ch).is_some() => {
                 self.activate_swatch(swatch_home_row_index(ch).unwrap());
             }
             _ => return false,
@@ -2051,293 +2215,319 @@ impl App {
         true
     }
 
-    fn handle_alt_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_alt_key(&mut self, key: AppKey) -> Option<Vec<HostEffect>> {
         match key.code {
-            KeyCode::Char('c') => self.copy_to_system_clipboard(),
-            KeyCode::Left => self.pan_by(-1, 0),
-            KeyCode::Right => self.pan_by(1, 0),
-            KeyCode::Up => self.pan_by(0, -1),
-            KeyCode::Down => self.pan_by(0, 1),
-            _ => return false,
+            AppKeyCode::Char('c') => return Some(vec![self.copy_to_system_clipboard_effect()]),
+            AppKeyCode::Left => self.pan_by(-1, 0),
+            AppKeyCode::Right => self.pan_by(1, 0),
+            AppKeyCode::Up => self.pan_by(0, -1),
+            AppKeyCode::Down => self.pan_by(0, 1),
+            _ => return None,
         }
 
-        true
+        Some(Vec::new())
     }
 
-    fn is_open_picker_key(key: KeyEvent) -> bool {
+    fn is_open_picker_key(key: AppKey) -> bool {
         matches!(
             key.code,
-            KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL)
+            AppKeyCode::Char(']') if key.modifiers.ctrl
         ) || matches!(
             key.code,
-            KeyCode::Char('5') if key.modifiers.contains(KeyModifiers::CONTROL)
-        ) || matches!(key.code, KeyCode::Char('\u{1d}'))
+            AppKeyCode::Char('5') if key.modifiers.ctrl
+        ) || matches!(key.code, AppKeyCode::Char('\u{1d}'))
     }
 
-    pub fn handle_event(&mut self, event: Event) {
-        self.handle_event_inner(event);
+    pub fn tick(&mut self) {
         self.drain_server_events();
     }
 
-    fn handle_event_inner(&mut self, event: Event) {
-        match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press && Self::is_open_picker_key(key) => {
-                self.open_emoji_picker();
+    pub fn handle_event(&mut self, event: Event) {
+        if let Some(intent) = AppIntent::from_crossterm(event) {
+            let effects = self.handle_intent(intent);
+            self.apply_host_effects(effects);
+        } else {
+            self.tick();
+        }
+    }
+
+    pub fn handle_intent(&mut self, intent: AppIntent) -> Vec<HostEffect> {
+        let effects = self.handle_intent_inner(intent);
+        self.clamp_cursor();
+        self.tick();
+        effects
+    }
+
+    fn apply_host_effects(&mut self, effects: Vec<HostEffect>) {
+        for effect in effects {
+            match effect {
+                HostEffect::RequestQuit => self.should_quit = true,
+                HostEffect::CopyToClipboard(text) => {
+                    let _ = execute!(io::stdout(), CopyToClipboard::to_clipboard_from(text));
+                }
             }
-            Event::Key(key) if key.kind == KeyEventKind::Press && self.emoji_picker_open => {
-                self.handle_picker_key(key);
+        }
+    }
+
+    fn handle_intent_inner(&mut self, intent: AppIntent) -> Vec<HostEffect> {
+        match intent {
+            AppIntent::KeyPress(key) => self.handle_key_input(key),
+            AppIntent::Pointer(mouse) => {
+                self.handle_pointer_input(mouse);
+                Vec::new()
+            }
+            AppIntent::Paste(data) => {
+                if !self.show_help {
+                    self.paste_text_block(&data);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    fn handle_key_input(&mut self, key: AppKey) -> Vec<HostEffect> {
+        if Self::is_open_picker_key(key) {
+            self.open_emoji_picker();
+            return Vec::new();
+        }
+
+        if self.emoji_picker_open {
+            self.handle_picker_key(key);
+            return Vec::new();
+        }
+
+        if key.code == AppKeyCode::Char('q') && key.modifiers.ctrl {
+            return vec![HostEffect::RequestQuit];
+        }
+
+        if self.show_help {
+            match key.code {
+                AppKeyCode::Esc | AppKeyCode::F(1) => self.show_help = false,
+                AppKeyCode::Char('p') if key.modifiers.ctrl => self.show_help = false,
+                AppKeyCode::Tab | AppKeyCode::BackTab => {
+                    self.help_tab = self.help_tab.toggle();
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
+
+        if key.code == AppKeyCode::Tab && key.modifiers == AppModifiers::default() {
+            self.switch_active_user(1);
+            return Vec::new();
+        }
+
+        if key.code == AppKeyCode::BackTab {
+            self.switch_active_user(-1);
+            return Vec::new();
+        }
+
+        if (key.code == AppKeyCode::Char('p') && key.modifiers.ctrl) || key.code == AppKeyCode::F(1)
+        {
+            self.show_help = !self.show_help;
+            return Vec::new();
+        }
+
+        self.handle_key_press(key)
+    }
+
+    fn handle_pointer_input(&mut self, mouse: AppPointerEvent) {
+        if self.emoji_picker_open {
+            self.handle_picker_mouse(mouse);
+            return;
+        }
+
+        if self.show_help {
+            if matches!(mouse.kind, AppPointerKind::Down(AppPointerButton::Left)) {
+                if let Some(tab) = self.help_tab_hit(mouse.column, mouse.row) {
+                    self.help_tab = tab;
+                }
+            }
+            return;
+        }
+
+        if matches!(mouse.kind, AppPointerKind::Down(AppPointerButton::Left)) {
+            if let Some((idx, zone)) = self.swatch_hit(mouse.column, mouse.row) {
+                match zone {
+                    SwatchZone::Pin => self.toggle_pin(idx),
+                    SwatchZone::Body => self.activate_swatch(idx),
+                }
                 return;
             }
-            Event::Mouse(mouse) if self.emoji_picker_open => {
-                self.handle_picker_mouse(mouse);
-                return;
-            }
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.should_quit = true;
-                    return;
-                }
+        }
 
-                if self.show_help {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::F(1) => self.show_help = false,
-                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.show_help = false
-                        }
-                        KeyCode::Tab | KeyCode::BackTab => {
-                            self.help_tab = self.help_tab.toggle();
-                        }
-                        _ => {}
+        let canvas_pos = self.mouse_to_canvas(mouse.column, mouse.row);
+
+        if self.floating.is_some() {
+            match mouse.kind {
+                AppPointerKind::Moved => {
+                    if let Some(pos) = canvas_pos {
+                        self.cursor = pos;
                     }
-                    return;
                 }
-
-                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
-                    self.switch_active_user(1);
-                    return;
+                AppPointerKind::Down(AppPointerButton::Left) => {
+                    if let Some(pos) = canvas_pos {
+                        self.cursor = pos;
+                        self.begin_paint_stroke();
+                        self.paint_floating_at_cursor();
+                    }
                 }
-
-                if key.code == KeyCode::BackTab {
-                    self.switch_active_user(-1);
-                    return;
+                AppPointerKind::Drag(AppPointerButton::Left) => {
+                    if let Some(pos) = canvas_pos {
+                        self.paint_floating_drag(pos);
+                    }
                 }
+                AppPointerKind::Up(AppPointerButton::Left) => {
+                    self.end_paint_stroke();
+                }
+                AppPointerKind::Down(AppPointerButton::Right) => {
+                    self.dismiss_floating();
+                }
+                _ => {}
+            }
+            return;
+        }
 
-                if (key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL))
-                    || key.code == KeyCode::F(1)
-                {
-                    self.show_help = !self.show_help;
-                } else {
-                    self.handle_key(key);
+        match mouse.kind {
+            AppPointerKind::Down(AppPointerButton::Right) => {
+                if self.viewport_contains(mouse.column, mouse.row) {
+                    self.begin_pan(mouse.column, mouse.row);
                 }
             }
-            Event::Mouse(mouse) => {
-                if self.show_help {
-                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        if let Some(tab) = self.help_tab_hit(mouse.column, mouse.row) {
-                            self.help_tab = tab;
-                        }
-                    }
-                    return;
-                }
+            AppPointerKind::Down(AppPointerButton::Left) => {
+                if let Some(pos) = canvas_pos {
+                    let extend_selection = mouse.modifiers.alt && self.selection_anchor.is_some();
+                    let ellipse_drag = mouse.modifiers.ctrl && !extend_selection;
 
-                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                    if let Some((idx, zone)) = self.swatch_hit(mouse.column, mouse.row) {
-                        match zone {
-                            SwatchZone::Pin => self.toggle_pin(idx),
-                            SwatchZone::Body => self.activate_swatch(idx),
+                    if extend_selection {
+                        if let Some(anchor) = self.selection_anchor {
+                            self.mode = Mode::Select;
+                            self.cursor = pos;
+                            self.drag_origin = Some(anchor);
                         }
-                        self.clamp_cursor();
-                        return;
-                    }
-                }
-
-                let canvas_pos = self.mouse_to_canvas(mouse.column, mouse.row);
-
-                if self.floating.is_some() {
-                    match mouse.kind {
-                        MouseEventKind::Moved => {
-                            if let Some(pos) = canvas_pos {
-                                self.cursor = pos;
-                            }
+                    } else {
+                        if self.mode.is_selecting() {
+                            self.clear_selection();
                         }
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            if let Some(pos) = canvas_pos {
-                                self.cursor = pos;
-                                self.begin_paint_stroke();
-                                self.paint_floating_at_cursor();
-                            }
-                        }
-                        MouseEventKind::Drag(MouseButton::Left) => {
-                            if let Some(pos) = canvas_pos {
-                                self.paint_floating_drag(pos);
-                            }
-                        }
-                        MouseEventKind::Up(MouseButton::Left) => {
-                            self.end_paint_stroke();
-                        }
-                        MouseEventKind::Down(MouseButton::Right) => {
-                            self.dismiss_floating();
-                        }
-                        _ => {}
-                    }
-                } else {
-                    match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Right) => {
-                            if self.viewport_contains(mouse.column, mouse.row) {
-                                self.begin_pan(mouse.column, mouse.row);
-                            }
-                        }
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            if let Some(pos) = canvas_pos {
-                                let extend_selection = mouse.modifiers.contains(KeyModifiers::ALT)
-                                    && self.selection_anchor.is_some();
-                                let ellipse_drag = mouse.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !extend_selection;
-
-                                if extend_selection {
-                                    if let Some(anchor) = self.selection_anchor {
-                                        self.mode = Mode::Select;
-                                        self.cursor = pos;
-                                        self.drag_origin = Some(anchor);
-                                    }
-                                } else {
-                                    if self.mode.is_selecting() {
-                                        self.clear_selection();
-                                    }
-                                    self.cursor = pos;
-                                    self.selection_shape = if ellipse_drag {
-                                        SelectionShape::Ellipse
-                                    } else {
-                                        SelectionShape::Rect
-                                    };
-                                    self.drag_origin = Some(pos);
-                                }
-                            }
-                        }
-                        MouseEventKind::Drag(MouseButton::Left) => {
-                            if let (Some(origin), Some(pos)) = (self.drag_origin, canvas_pos) {
-                                if pos != origin || self.mode.is_selecting() {
-                                    self.selection_anchor = Some(origin);
-                                    self.mode = Mode::Select;
-                                    self.cursor = pos;
-                                }
-                            }
-                        }
-                        MouseEventKind::Drag(MouseButton::Right) => {
-                            self.drag_pan(mouse.column, mouse.row);
-                        }
-                        MouseEventKind::Up(MouseButton::Left) => {
-                            self.drag_origin = None;
-                        }
-                        MouseEventKind::Up(MouseButton::Right) => {
-                            self.end_pan();
-                        }
-                        _ => {}
+                        self.cursor = pos;
+                        self.selection_shape = if ellipse_drag {
+                            SelectionShape::Ellipse
+                        } else {
+                            SelectionShape::Rect
+                        };
+                        self.drag_origin = Some(pos);
                     }
                 }
             }
-            Event::Paste(data) => {
-                if self.show_help {
-                    return;
+            AppPointerKind::Drag(AppPointerButton::Left) => {
+                if let (Some(origin), Some(pos)) = (self.drag_origin, canvas_pos) {
+                    if pos != origin || self.mode.is_selecting() {
+                        self.selection_anchor = Some(origin);
+                        self.mode = Mode::Select;
+                        self.cursor = pos;
+                    }
                 }
-                self.paste_text_block(&data);
+            }
+            AppPointerKind::Drag(AppPointerButton::Right) => {
+                self.drag_pan(mouse.column, mouse.row);
+            }
+            AppPointerKind::Up(AppPointerButton::Left) => {
+                self.drag_origin = None;
+            }
+            AppPointerKind::Up(AppPointerButton::Right) => {
+                self.end_pan();
             }
             _ => {}
         }
-        self.clamp_cursor();
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    fn handle_key_press(&mut self, key: AppKey) -> Vec<HostEffect> {
         if self.floating.is_some() {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let alt = key
-                .modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::META);
+            let ctrl = key.modifiers.ctrl;
+            let alt = key.modifiers.has_alt_like();
 
             match key.code {
-                KeyCode::Char('t') if ctrl => {
+                AppKeyCode::Char('t') if ctrl => {
                     self.toggle_float_transparency();
-                    return;
+                    return Vec::new();
                 }
-                KeyCode::Char(ch) if ctrl && swatch_home_row_index(ch).is_some() => {
+                AppKeyCode::Char(ch) if ctrl && swatch_home_row_index(ch).is_some() => {
                     self.activate_swatch(swatch_home_row_index(ch).unwrap());
-                    return;
+                    return Vec::new();
                 }
-                KeyCode::Char('c') | KeyCode::Char('x') if ctrl => {
-                    return;
+                AppKeyCode::Char('c') | AppKeyCode::Char('x') if ctrl => {
+                    return Vec::new();
                 }
-                KeyCode::Char('v') if ctrl => {
+                AppKeyCode::Char('v') if ctrl => {
                     self.stamp_floating();
-                    return;
+                    return Vec::new();
                 }
-                KeyCode::Esc => {
+                AppKeyCode::Esc => {
                     self.dismiss_floating();
-                    return;
+                    return Vec::new();
                 }
-                KeyCode::Up if !ctrl && !alt => {
+                AppKeyCode::Up if !ctrl && !alt => {
                     self.move_up();
-                    return;
+                    return Vec::new();
                 }
-                KeyCode::Down if !ctrl && !alt => {
+                AppKeyCode::Down if !ctrl && !alt => {
                     self.move_down();
-                    return;
+                    return Vec::new();
                 }
-                KeyCode::Left if !ctrl && !alt => {
+                AppKeyCode::Left if !ctrl && !alt => {
                     self.move_left();
-                    return;
+                    return Vec::new();
                 }
-                KeyCode::Right if !ctrl && !alt => {
+                AppKeyCode::Right if !ctrl && !alt => {
                     self.move_right();
-                    return;
+                    return Vec::new();
                 }
                 _ if alt => {} // Keep floating, let alt handler process (e.g. panning)
-                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
-                    if ctrl && key.modifiers.contains(KeyModifiers::SHIFT) => {}
+                AppKeyCode::Up | AppKeyCode::Down | AppKeyCode::Left | AppKeyCode::Right
+                    if ctrl && key.modifiers.shift => {}
                 _ => {
                     self.dismiss_floating();
                 }
             }
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && self.handle_control_key(key) {
-            return;
+        if key.modifiers.ctrl && self.handle_control_key(key) {
+            return Vec::new();
         }
 
-        if key
-            .modifiers
-            .intersects(KeyModifiers::ALT | KeyModifiers::META)
-            && self.handle_alt_key(key)
-        {
-            return;
+        if key.modifiers.has_alt_like() {
+            if let Some(effects) = self.handle_alt_key(key) {
+                return effects;
+            }
         }
 
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let shift = key.modifiers.shift;
         let is_move = matches!(
             key.code,
-            KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::PageUp
-                | KeyCode::PageDown
+            AppKeyCode::Up
+                | AppKeyCode::Down
+                | AppKeyCode::Left
+                | AppKeyCode::Right
+                | AppKeyCode::Home
+                | AppKeyCode::End
+                | AppKeyCode::PageUp
+                | AppKeyCode::PageDown
         );
 
         if is_move && shift {
             self.begin_selection();
             match key.code {
-                KeyCode::Up => self.move_up(),
-                KeyCode::Down => self.move_down(),
-                KeyCode::Left => self.move_left(),
-                KeyCode::Right => self.move_right(),
-                KeyCode::Home => self.cursor.x = self.visible_bounds().min_x,
-                KeyCode::End => self.cursor.x = self.visible_bounds().max_x,
-                KeyCode::PageUp => self.cursor.y = self.visible_bounds().min_y,
-                KeyCode::PageDown => self.cursor.y = self.visible_bounds().max_y,
+                AppKeyCode::Up => self.move_up(),
+                AppKeyCode::Down => self.move_down(),
+                AppKeyCode::Left => self.move_left(),
+                AppKeyCode::Right => self.move_right(),
+                AppKeyCode::Home => self.cursor.x = self.visible_bounds().min_x,
+                AppKeyCode::End => self.cursor.x = self.visible_bounds().max_x,
+                AppKeyCode::PageUp => self.cursor.y = self.visible_bounds().min_y,
+                AppKeyCode::PageDown => self.cursor.y = self.visible_bounds().max_y,
                 _ => {}
             }
-            return;
+            return Vec::new();
         }
 
         if is_move && self.mode.is_selecting() {
@@ -2345,32 +2535,44 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Up => self.move_up(),
-            KeyCode::Down => self.move_down(),
-            KeyCode::Left => self.move_left(),
-            KeyCode::Right => self.move_right(),
-            KeyCode::Home => self.cursor.x = self.visible_bounds().min_x,
-            KeyCode::End => self.cursor.x = self.visible_bounds().max_x,
-            KeyCode::PageUp => self.cursor.y = self.visible_bounds().min_y,
-            KeyCode::PageDown => self.cursor.y = self.visible_bounds().max_y,
-            KeyCode::Enter => self.move_down(),
-            KeyCode::Esc => self.clear_selection(),
+            AppKeyCode::Up => self.move_up(),
+            AppKeyCode::Down => self.move_down(),
+            AppKeyCode::Left => self.move_left(),
+            AppKeyCode::Right => self.move_right(),
+            AppKeyCode::Home => self.cursor.x = self.visible_bounds().min_x,
+            AppKeyCode::End => self.cursor.x = self.visible_bounds().max_x,
+            AppKeyCode::PageUp => self.cursor.y = self.visible_bounds().min_y,
+            AppKeyCode::PageDown => self.cursor.y = self.visible_bounds().max_y,
+            AppKeyCode::Enter => self.move_down(),
+            AppKeyCode::Esc => self.clear_selection(),
             _ if self.mode.is_selecting() && self.selection_anchor.is_some() => match key.code {
-                KeyCode::Char(ch) => self.fill_selection_or_cell(ch),
-                KeyCode::Backspace | KeyCode::Delete => self.fill_selection_or_cell(' '),
+                AppKeyCode::Char(ch) => self.fill_selection_or_cell(ch),
+                AppKeyCode::Backspace | AppKeyCode::Delete => self.fill_selection_or_cell(' '),
                 _ => {}
             },
             _ => match key.code {
-                KeyCode::Char(ch) => {
+                AppKeyCode::Char(ch) => {
                     self.insert_char(ch);
                 }
-                KeyCode::Backspace => self.backspace(),
-                KeyCode::Delete => self.delete_at_cursor(),
+                AppKeyCode::Backspace => self.backspace(),
+                AppKeyCode::Delete => self.delete_at_cursor(),
                 _ => {}
             },
         }
+
+        Vec::new()
     }
 
+    #[cfg(test)]
+    fn handle_key(&mut self, key: KeyEvent) {
+        let Some(key) = AppKey::from_crossterm(key) else {
+            return;
+        };
+        let _ = self.handle_key_press(key);
+        self.clamp_cursor();
+    }
+
+    #[cfg(test)]
     pub fn is_selected(&self, pos: Pos) -> bool {
         let Some(selection) = self.selection() else {
             return false;
@@ -2442,7 +2644,10 @@ fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, HelpTab, Mode, SelectionShape, SWATCH_CAPACITY};
+    use super::{
+        App, AppIntent, AppKey, AppKeyCode, AppModifiers, HelpTab, HostEffect, Mode,
+        SelectionShape, SWATCH_CAPACITY,
+    };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -2723,6 +2928,22 @@ mod tests {
 
         assert!(app.should_quit);
         assert!(app.show_help);
+    }
+
+    #[test]
+    fn intent_api_emits_quit_effect_without_applying_it() {
+        let mut app = App::new();
+
+        let effects = app.handle_intent(AppIntent::KeyPress(AppKey {
+            code: AppKeyCode::Char('q'),
+            modifiers: AppModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        }));
+
+        assert_eq!(effects, vec![HostEffect::RequestQuit]);
+        assert!(!app.should_quit);
     }
 
     #[test]
@@ -3059,6 +3280,43 @@ mod tests {
             !app.undo_enabled(),
             "undo must be gated off while a remote peer is present"
         );
+    }
+
+    #[test]
+    fn websocket_connect_fails_fast_when_server_is_full() {
+        use crate::theme;
+        use dartboard_client_ws::{ConnectError, Hello as WsHello, WebsocketClient};
+        use dartboard_server::{Hello, InMemStore, ServerHandle, MAX_PLAYERS};
+
+        let server = ServerHandle::spawn_local(InMemStore);
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        server.bind_ws(addr).unwrap();
+
+        let mut _peers = Vec::new();
+        for i in 0..MAX_PLAYERS {
+            _peers.push(server.connect_local(Hello {
+                name: format!("peer{i}"),
+                color: theme::PLAYER_PALETTE[i],
+            }));
+        }
+
+        let url = format!("ws://{}", addr);
+        match WebsocketClient::connect(
+            &url,
+            WsHello {
+                name: "overflow".into(),
+                color: RgbColor::new(255, 0, 0),
+            },
+        ) {
+            Err(ConnectError::Rejected(reason)) => {
+                assert!(reason.to_lowercase().contains("full"), "reason: {reason}");
+            }
+            Err(other) => panic!("expected ConnectError::Rejected, got {other:?}"),
+            Ok(_) => panic!("connect should have been rejected"),
+        }
     }
 
     #[test]
@@ -4006,5 +4264,23 @@ mod tests {
         app.canvas.set(Pos { x: 2, y: 1 }, 'Z');
 
         assert_eq!(app.export_system_clipboard_text(), "A  \n  Z");
+    }
+
+    #[test]
+    fn intent_api_emits_copy_effect_for_alt_c() {
+        let mut app = App::new();
+        app.canvas.width = 1;
+        app.canvas.height = 1;
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+
+        let effects = app.handle_intent(AppIntent::KeyPress(AppKey {
+            code: AppKeyCode::Char('c'),
+            modifiers: AppModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        }));
+
+        assert_eq!(effects, vec![HostEffect::CopyToClipboard("A".to_string())]);
     }
 }

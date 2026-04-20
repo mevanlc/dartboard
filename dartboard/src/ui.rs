@@ -2,14 +2,18 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, HelpTab, Swatch, SWATCH_CAPACITY};
+use crate::app::{App, FloatingSelection, HelpTab, Swatch, SWATCH_CAPACITY};
 use crate::emoji;
 use crate::theme;
-use dartboard_core::{CellValue, Pos};
+use dartboard_core::CellValue;
+use dartboard_tui::{
+    CanvasStyle, CanvasWidget, CanvasWidgetState, FloatingView,
+    SelectionShape as TuiSelectionShape, SelectionView,
+};
 
 const USER_LIST_MIN_WIDTH: u16 = 12;
 const USER_LIST_MAX_WIDTH: u16 = 24;
@@ -25,89 +29,39 @@ const PIN_PINNED: char = '📍';
 const HELP_SEPARATOR: &str = "  │  ";
 const HELP_SEPARATOR_COLS: u16 = 5;
 
-struct CanvasWidget<'a> {
-    app: &'a App,
+fn canvas_style() -> CanvasStyle {
+    CanvasStyle {
+        oob_bg: theme::OOB_BG,
+        default_glyph_fg: theme::TEXT,
+        selection_bg: theme::SELECTION_BG,
+        selection_fg: theme::HIGHLIGHT,
+        floating_bg: theme::FLOAT_BG,
+    }
 }
 
-impl<'a> Widget for CanvasWidget<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let cw = self.app.canvas.width;
-        let ch = self.app.canvas.height;
-        let ox = self.app.viewport_origin.x;
-        let oy = self.app.viewport_origin.y;
-        let has_selection = self.app.selection_anchor.is_some() && self.app.mode.is_selecting();
+fn selection_view_from(app: &App) -> Option<SelectionView> {
+    if !app.mode.is_selecting() {
+        return None;
+    }
+    let selection = app.selection()?;
+    Some(SelectionView {
+        anchor: selection.anchor,
+        cursor: selection.cursor,
+        shape: match selection.shape {
+            crate::app::SelectionShape::Rect => TuiSelectionShape::Rect,
+            crate::app::SelectionShape::Ellipse => TuiSelectionShape::Ellipse,
+        },
+    })
+}
 
-        for dy in 0..area.height {
-            for dx in 0..area.width {
-                let x = ox + dx as usize;
-                let y = oy + dy as usize;
-                let cell = &mut buf[(area.x + dx, area.y + dy)];
-
-                if x >= cw || y >= ch {
-                    cell.set_bg(theme::OOB_BG);
-                    continue;
-                }
-
-                let pos = Pos { x, y };
-                let cell_value = self.app.canvas.cell(pos);
-                let glyph_fg = self
-                    .app
-                    .canvas
-                    .fg(pos)
-                    .map(theme::rat)
-                    .unwrap_or(theme::TEXT);
-
-                if has_selection && self.app.is_selected(pos) {
-                    cell.set_bg(theme::SELECTION_BG).set_fg(theme::HIGHLIGHT);
-                    if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
-                        cell.set_char(ch);
-                    }
-                } else if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
-                    cell.set_char(ch).set_fg(glyph_fg);
-                }
-            }
-        }
-
-        if let Some(ref floating) = self.app.floating {
-            let cb = &floating.clipboard;
-            let fx = self.app.cursor.x;
-            let fy = self.app.cursor.y;
-            let active_color = theme::rat(self.app.active_user_color());
-
-            for cy in 0..cb.height {
-                for cx in 0..cb.width {
-                    let canvas_x = fx + cx;
-                    let canvas_y = fy + cy;
-
-                    if canvas_x >= cw || canvas_y >= ch || canvas_x < ox || canvas_y < oy {
-                        continue;
-                    }
-
-                    let dx = (canvas_x - ox) as u16;
-                    let dy = (canvas_y - oy) as u16;
-
-                    if dx >= area.width || dy >= area.height {
-                        continue;
-                    }
-
-                    let cell = &mut buf[(area.x + dx, area.y + dy)];
-                    match cb.get(cx, cy) {
-                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                            cell.set_char(ch)
-                                .set_bg(theme::FLOAT_BG)
-                                .set_fg(active_color);
-                        }
-                        Some(CellValue::WideCont) => {
-                            cell.set_bg(theme::FLOAT_BG);
-                        }
-                        None if !floating.transparent => {
-                            cell.set_char(' ').set_bg(theme::FLOAT_BG);
-                        }
-                        None => {}
-                    }
-                }
-            }
-        }
+fn floating_view_from<'a>(app: &'a App, floating: &'a FloatingSelection) -> FloatingView<'a> {
+    FloatingView {
+        width: floating.clipboard.width,
+        height: floating.clipboard.height,
+        cells: floating.clipboard.cells(),
+        anchor: app.cursor,
+        transparent: floating.transparent,
+        active_color: app.active_user_color(),
     }
 }
 
@@ -148,7 +102,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     app.set_viewport(canvas_area);
 
-    frame.render_widget(CanvasWidget { app }, canvas_area);
+    let mut canvas_state = CanvasWidgetState::new(&app.canvas, app.viewport_origin);
+    if let Some(view) = selection_view_from(app) {
+        canvas_state = canvas_state.selection(view);
+    }
+    if let Some(ref floating) = app.floating {
+        canvas_state = canvas_state.floating(floating_view_from(app, floating));
+    }
+    frame.render_widget(
+        CanvasWidget::new(&canvas_state).style(canvas_style()),
+        canvas_area,
+    );
     let user_list_rect = render_user_list(frame, canvas_area, app);
     render_swatch_strip(frame, canvas_area, app);
 
@@ -491,7 +455,11 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
 
     frame.render_widget(Clear, panel);
 
-    let title_text = if app.is_embedded() { " colors " } else { " users " };
+    let title_text = if app.is_embedded() {
+        " colors "
+    } else {
+        " users "
+    };
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)

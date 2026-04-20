@@ -12,6 +12,7 @@ path = "src/main.rs"
 dartboard-core.workspace = true
 dartboard-server.workspace = true
 dartboard-client-ws.workspace = true
+dartboard-tui.workspace = true
 
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["osc52"] }
