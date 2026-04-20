@@ -22,13 +22,13 @@ use dartboard_editor::{
 use dartboard_editor::{
     begin_paint_stroke as editor_begin_paint_stroke, diff_canvas_op as editor_diff_canvas_op,
     dismiss_floating as editor_dismiss_floating, end_paint_stroke as editor_end_paint_stroke,
-    handle_editor_key_press as editor_handle_key_press, insert_char as editor_insert_char,
+    handle_editor_action as editor_handle_action, insert_char as editor_insert_char,
     paint_floating_drag as editor_paint_floating_drag, paste_text_block as editor_paste_text_block,
     stamp_floating as editor_stamp_floating,
 };
 pub use dartboard_editor::{
-    Clipboard, EditorSession, FloatingSelection, HostEffect, Mode, PanDrag, Selection,
-    SelectionShape, Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
+    Clipboard, EditorAction, EditorSession, FloatingSelection, HostEffect, KeyMap, Mode, MoveDir,
+    PanDrag, Selection, SelectionShape, Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
@@ -1301,52 +1301,13 @@ impl App {
     }
 
     fn handle_key_press(&mut self, key: AppKey) -> Vec<HostEffect> {
-        if self.floating.is_some() {
-            let ctrl = key.modifiers.ctrl;
-            let alt = key.modifiers.has_alt_like();
+        let action =
+            KeyMap::default_standalone().resolve(key, self.mode, self.selection_anchor.is_some());
 
-            match key.code {
-                AppKeyCode::Char('t') if ctrl => {
-                    self.toggle_float_transparency();
-                    return Vec::new();
-                }
-                AppKeyCode::Char(ch) if ctrl && swatch_home_row_index(ch).is_some() => {
-                    self.activate_swatch(swatch_home_row_index(ch).unwrap());
-                    return Vec::new();
-                }
-                AppKeyCode::Char('c') | AppKeyCode::Char('x') if ctrl => {
-                    return Vec::new();
-                }
-                AppKeyCode::Char('v') if ctrl => {
-                    self.stamp_floating();
-                    return Vec::new();
-                }
-                AppKeyCode::Esc => {
-                    self.dismiss_floating();
-                    return Vec::new();
-                }
-                AppKeyCode::Up if !ctrl && !alt => {
-                    self.move_up();
-                    return Vec::new();
-                }
-                AppKeyCode::Down if !ctrl && !alt => {
-                    self.move_down();
-                    return Vec::new();
-                }
-                AppKeyCode::Left if !ctrl && !alt => {
-                    self.move_left();
-                    return Vec::new();
-                }
-                AppKeyCode::Right if !ctrl && !alt => {
-                    self.move_right();
-                    return Vec::new();
-                }
-                _ if alt => {} // Keep floating, let alt handler process (e.g. panning)
-                AppKeyCode::Up | AppKeyCode::Down | AppKeyCode::Left | AppKeyCode::Right
-                    if ctrl && key.modifiers.shift => {}
-                _ => {
-                    self.dismiss_floating();
-                }
+        if self.floating.is_some() {
+            match self.apply_floating_override(key, action) {
+                FloatingOutcome::Consumed => return Vec::new(),
+                FloatingOutcome::PassThrough | FloatingOutcome::DismissAndContinue => {}
             }
         }
 
@@ -1360,15 +1321,83 @@ impl App {
             return Vec::new();
         }
 
+        let Some(action) = action else {
+            return Vec::new();
+        };
+
         let color = self.active_user_color();
         let before = self.canvas.clone();
         let dispatch = self.with_editor_and_canvas_mut(|editor, canvas| {
-            editor_handle_key_press(editor, canvas, key, color)
+            editor_handle_action(editor, canvas, action, color)
         });
         if self.canvas != before {
             self.finish_canvas_edit(before);
         }
         dispatch.effects
+    }
+
+    fn apply_floating_override(
+        &mut self,
+        key: AppKey,
+        action: Option<EditorAction>,
+    ) -> FloatingOutcome {
+        // Ctrl+T overrides TransposeSelectionCorner to toggle float transparency.
+        if key.modifiers.ctrl && key.code == AppKeyCode::Char('t') {
+            self.toggle_float_transparency();
+            return FloatingOutcome::Consumed;
+        }
+
+        match action {
+            Some(EditorAction::ActivateSwatch(idx)) => {
+                self.activate_swatch(idx);
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::PastePrimarySwatch) => {
+                self.stamp_floating();
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::CopySelection) | Some(EditorAction::CutSelection) => {
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::ClearSelection) => {
+                self.dismiss_floating();
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::Move {
+                dir: MoveDir::Up, ..
+            }) => {
+                self.move_up();
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::Move {
+                dir: MoveDir::Down,
+                ..
+            }) => {
+                self.move_down();
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::Move {
+                dir: MoveDir::Left,
+                ..
+            }) => {
+                self.move_left();
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::Move {
+                dir: MoveDir::Right,
+                ..
+            }) => {
+                self.move_right();
+                FloatingOutcome::Consumed
+            }
+            Some(EditorAction::Pan { .. }) | Some(EditorAction::ExportSystemClipboard) => {
+                FloatingOutcome::PassThrough
+            }
+            _ => {
+                self.dismiss_floating();
+                FloatingOutcome::DismissAndContinue
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1393,15 +1422,11 @@ fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
     col >= rect.x && row >= rect.y && col < rect.x + rect.width && row < rect.y + rect.height
 }
 
-fn swatch_home_row_index(ch: char) -> Option<usize> {
-    match ch {
-        'a' | 'A' => Some(0),
-        's' | 'S' => Some(1),
-        'd' | 'D' => Some(2),
-        'f' | 'F' => Some(3),
-        'g' | 'G' => Some(4),
-        _ => None,
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatingOutcome {
+    Consumed,
+    PassThrough,
+    DismissAndContinue,
 }
 
 fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
