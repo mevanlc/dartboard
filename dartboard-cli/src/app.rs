@@ -27,8 +27,9 @@ use dartboard_editor::{
     stamp_floating as editor_stamp_floating,
 };
 pub use dartboard_editor::{
-    Clipboard, EditorAction, EditorSession, FloatingSelection, HostEffect, KeyMap, Mode, MoveDir,
-    PanDrag, Selection, SelectionShape, Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
+    Clipboard, EditorAction, EditorContext, EditorSession, FloatingSelection, HostEffect, KeyMap,
+    Mode, MoveDir, PanDrag, Selection, SelectionShape, Swatch, SwatchActivation, Viewport,
+    SWATCH_CAPACITY,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
@@ -755,10 +756,6 @@ impl App {
         }
     }
 
-    fn toggle_float_transparency(&mut self) {
-        self.with_editor_session_mut(|editor, _| editor.toggle_float_transparency());
-    }
-
     fn stamp_floating(&mut self) {
         let color = self.active_user_color();
         let before = self.canvas.clone();
@@ -1301,11 +1298,15 @@ impl App {
     }
 
     fn handle_key_press(&mut self, key: AppKey) -> Vec<HostEffect> {
-        let action =
-            KeyMap::default_standalone().resolve(key, self.mode, self.selection_anchor.is_some());
+        let ctx = EditorContext {
+            mode: self.mode,
+            has_selection_anchor: self.selection_anchor.is_some(),
+            is_floating: self.floating.is_some(),
+        };
+        let action = KeyMap::default_standalone().resolve(key, ctx);
 
         if self.floating.is_some() {
-            match self.apply_floating_override(key, action) {
+            match self.apply_floating_override(action) {
                 FloatingOutcome::Consumed => return Vec::new(),
                 FloatingOutcome::PassThrough | FloatingOutcome::DismissAndContinue => {}
             }
@@ -1336,17 +1337,7 @@ impl App {
         dispatch.effects
     }
 
-    fn apply_floating_override(
-        &mut self,
-        key: AppKey,
-        action: Option<EditorAction>,
-    ) -> FloatingOutcome {
-        // Ctrl+T overrides TransposeSelectionCorner to toggle float transparency.
-        if key.modifiers.ctrl && key.code == AppKeyCode::Char('t') {
-            self.toggle_float_transparency();
-            return FloatingOutcome::Consumed;
-        }
-
+    fn apply_floating_override(&mut self, action: Option<EditorAction>) -> FloatingOutcome {
         match action {
             Some(EditorAction::ActivateSwatch(idx)) => {
                 self.activate_swatch(idx);
@@ -1390,9 +1381,9 @@ impl App {
                 self.move_right();
                 FloatingOutcome::Consumed
             }
-            Some(EditorAction::Pan { .. }) | Some(EditorAction::ExportSystemClipboard) => {
-                FloatingOutcome::PassThrough
-            }
+            Some(EditorAction::Pan { .. })
+            | Some(EditorAction::ExportSystemClipboard)
+            | Some(EditorAction::ToggleFloatingTransparency) => FloatingOutcome::PassThrough,
             _ => {
                 self.dismiss_floating();
                 FloatingOutcome::DismissAndContinue

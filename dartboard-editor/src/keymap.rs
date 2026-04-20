@@ -20,6 +20,15 @@ pub enum BindingContext {
     Always,
     WhenSelecting,
     WhenNotSelecting,
+    WhenFloating,
+    WhenNotFloating,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EditorContext {
+    pub mode: Mode,
+    pub has_selection_anchor: bool,
+    pub is_floating: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,15 +57,9 @@ impl KeyMap {
         &self.bindings
     }
 
-    pub fn resolve(
-        &self,
-        key: AppKey,
-        mode: Mode,
-        has_selection_anchor: bool,
-    ) -> Option<EditorAction> {
-        let selecting = mode.is_selecting() && has_selection_anchor;
+    pub fn resolve(&self, key: AppKey, ctx: EditorContext) -> Option<EditorAction> {
         for binding in &self.bindings {
-            if !context_matches(binding.context, selecting) {
+            if !context_matches(binding.context, ctx) {
                 continue;
             }
             if let Some(action) = resolve_binding(binding, key) {
@@ -67,11 +70,14 @@ impl KeyMap {
     }
 }
 
-fn context_matches(ctx: BindingContext, selecting: bool) -> bool {
-    match ctx {
+fn context_matches(binding_ctx: BindingContext, ctx: EditorContext) -> bool {
+    let selecting = ctx.mode.is_selecting() && ctx.has_selection_anchor;
+    match binding_ctx {
         BindingContext::Always => true,
         BindingContext::WhenSelecting => selecting,
         BindingContext::WhenNotSelecting => !selecting,
+        BindingContext::WhenFloating => ctx.is_floating,
+        BindingContext::WhenNotFloating => !ctx.is_floating,
     }
 }
 
@@ -169,6 +175,18 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             description: "pan viewport",
         });
     }
+
+    // Ctrl+T: toggle float transparency while floating, otherwise transpose
+    // the selection corner (added via the Ctrl+key loop below).
+    out.push(KeyBinding {
+        trigger: KeyTrigger::Key(AppKey {
+            code: AppKeyCode::Char('t'),
+            modifiers: ctrl,
+        }),
+        action: ActionSpec::Fixed(EditorAction::ToggleFloatingTransparency),
+        context: BindingContext::WhenFloating,
+        description: "toggle float transparency",
+    });
 
     // Ctrl+key editor commands.
     for (code, action, desc) in [
@@ -401,11 +419,28 @@ mod tests {
     }
 
     fn resolve(key: AppKey) -> Option<EditorAction> {
-        map().resolve(key, Mode::Draw, false)
+        map().resolve(key, EditorContext::default())
     }
 
     fn resolve_selecting(key: AppKey) -> Option<EditorAction> {
-        map().resolve(key, Mode::Select, true)
+        map().resolve(
+            key,
+            EditorContext {
+                mode: Mode::Select,
+                has_selection_anchor: true,
+                is_floating: false,
+            },
+        )
+    }
+
+    fn resolve_floating(key: AppKey) -> Option<EditorAction> {
+        map().resolve(
+            key,
+            EditorContext {
+                is_floating: true,
+                ..Default::default()
+            },
+        )
     }
 
     fn key(code: AppKeyCode, mods: AppModifiers) -> AppKey {
@@ -530,6 +565,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(resolve(key(AppKeyCode::Char('z'), mods)), None);
+    }
+
+    #[test]
+    fn ctrl_t_depends_on_floating_context() {
+        let ctrl = AppModifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve(key(AppKeyCode::Char('t'), ctrl)),
+            Some(EditorAction::TransposeSelectionCorner)
+        );
+        assert_eq!(
+            resolve_floating(key(AppKeyCode::Char('t'), ctrl)),
+            Some(EditorAction::ToggleFloatingTransparency)
+        );
     }
 
     #[test]

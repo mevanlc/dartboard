@@ -4,7 +4,7 @@ use dartboard_core::{ops::CellWrite, Canvas, CanvasOp, CellValue, Pos, RgbColor}
 
 pub mod keymap;
 
-pub use keymap::{ActionSpec, BindingContext, KeyBinding, KeyMap, KeyTrigger};
+pub use keymap::{ActionSpec, BindingContext, EditorContext, KeyBinding, KeyMap, KeyTrigger};
 
 pub const SWATCH_CAPACITY: usize = 5;
 
@@ -142,10 +142,13 @@ pub enum EditorAction {
     InsertChar(char),
     Backspace,
     Delete,
+
+    ToggleFloatingTransparency,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
+    #[default]
     Draw,
     Select,
 }
@@ -1218,8 +1221,12 @@ pub fn handle_editor_key_press(
     key: AppKey,
     color: RgbColor,
 ) -> EditorKeyDispatch {
-    let has_anchor = editor.selection_anchor.is_some();
-    match KeyMap::default_standalone().resolve(key, editor.mode, has_anchor) {
+    let ctx = keymap::EditorContext {
+        mode: editor.mode,
+        has_selection_anchor: editor.selection_anchor.is_some(),
+        is_floating: editor.floating.is_some(),
+    };
+    match KeyMap::default_standalone().resolve(key, ctx) {
         Some(action) => handle_editor_action(editor, canvas, action, color),
         None => EditorKeyDispatch::default(),
     }
@@ -1294,6 +1301,7 @@ pub fn handle_editor_action(
         EditorAction::Delete => {
             let _ = delete_at_cursor(editor, canvas);
         }
+        EditorAction::ToggleFloatingTransparency => editor.toggle_float_transparency(),
     }
     EditorKeyDispatch {
         handled: true,
