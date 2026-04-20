@@ -7,9 +7,9 @@ use crossterm::{clipboard::CopyToClipboard, execute};
 use ratatui::layout::Rect;
 
 use dartboard_client_ws::WebsocketClient;
-use dartboard_core::{
-    Canvas, CanvasOp, Client, ClientOpId, Peer, Pos, RgbColor, ServerMsg, UserId,
-};
+use dartboard_core::{Canvas, CanvasOp, Client, ClientOpId, Pos, RgbColor, ServerMsg};
+#[cfg(test)]
+use dartboard_core::UserId;
 #[cfg(test)]
 use dartboard_editor::{
     backspace as editor_backspace, copy_selection_or_cell as editor_copy_selection_or_cell,
@@ -24,12 +24,12 @@ use dartboard_editor::{
     dismiss_floating as editor_dismiss_floating, end_paint_stroke as editor_end_paint_stroke,
     handle_editor_action as editor_handle_action, insert_char as editor_insert_char,
     paint_floating_drag as editor_paint_floating_drag, paste_text_block as editor_paste_text_block,
-    stamp_floating as editor_stamp_floating,
+    stamp_floating as editor_stamp_floating, MirrorEvent, SessionMirror,
 };
 pub use dartboard_editor::{
-    Clipboard, EditorAction, EditorContext, EditorSession, FloatingSelection, HostEffect, KeyMap,
-    Mode, MoveDir, PanDrag, Selection, SelectionShape, Swatch, SwatchActivation, Viewport,
-    SWATCH_CAPACITY,
+    Clipboard, ConnectState, EditorAction, EditorContext, EditorSession, FloatingSelection,
+    HostEffect, KeyMap, Mode, MoveDir, PanDrag, Selection, SelectionShape, Swatch,
+    SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
@@ -54,8 +54,7 @@ pub enum Transport {
     },
     Remote {
         client: ClientBox,
-        peers: Vec<Peer>,
-        my_user_id: Option<UserId>,
+        mirror: SessionMirror,
     },
 }
 
@@ -351,16 +350,15 @@ impl App {
             active_user_idx: 0,
             transport: Transport::Remote {
                 client: ClientBox::Ws(client),
-                peers: Vec::new(),
-                my_user_id: None,
+                mirror: SessionMirror::new(),
             },
         };
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(3);
         loop {
             app.drain_server_events();
-            if let Transport::Remote { my_user_id, .. } = &app.transport {
-                if my_user_id.is_some() {
+            if let Transport::Remote { mirror, .. } = &app.transport {
+                if mirror.my_user_id.is_some() {
                     break;
                 }
             }
@@ -496,7 +494,7 @@ impl App {
     pub fn peer_count(&self) -> usize {
         match &self.transport {
             Transport::Embedded { server, .. } => server.peer_count(),
-            Transport::Remote { peers, .. } => peers.len() + 1,
+            Transport::Remote { mirror, .. } => mirror.peers.len() + 1,
         }
     }
 
@@ -508,7 +506,7 @@ impl App {
     fn undo_enabled(&self) -> bool {
         match &self.transport {
             Transport::Embedded { .. } => true,
-            Transport::Remote { peers, .. } => peers.is_empty(),
+            Transport::Remote { mirror, .. } => mirror.peers.is_empty(),
         }
     }
 
@@ -523,25 +521,22 @@ impl App {
                     }
                 }
             }
-            Transport::Remote {
-                client,
-                peers,
-                my_user_id,
-            } => {
+            Transport::Remote { client, mirror } => {
                 while let Some(msg) = client.try_recv() {
-                    match msg {
-                        ServerMsg::Welcome {
-                            your_user_id,
-                            your_color,
-                            peers: initial_peers,
+                    let Some(event) = mirror.apply(msg) else {
+                        continue;
+                    };
+                    match event {
+                        MirrorEvent::Welcomed {
+                            my_color,
+                            peers,
                             snapshot,
+                            ..
                         } => {
-                            *my_user_id = Some(your_user_id);
-                            *peers = initial_peers.clone();
                             self.canvas = snapshot;
                             self.users.truncate(1);
-                            self.users[0].color = your_color;
-                            for p in initial_peers {
+                            self.users[0].color = my_color;
+                            for p in peers {
                                 self.users.push(LocalUser {
                                     name: p.name,
                                     color: p.color,
@@ -549,32 +544,24 @@ impl App {
                                 });
                             }
                         }
-                        ServerMsg::OpBroadcast { op, from, .. } => {
-                            if Some(from) != *my_user_id {
-                                self.canvas.apply(&op);
-                            }
+                        MirrorEvent::RemoteOp { op, .. } => {
+                            self.canvas.apply(&op);
                         }
-                        ServerMsg::PeerJoined { peer } => {
-                            peers.push(peer.clone());
+                        MirrorEvent::PeerJoined(peer) => {
                             self.users.push(LocalUser {
                                 name: peer.name,
                                 color: peer.color,
                                 session: UserSession::default(),
                             });
                         }
-                        ServerMsg::PeerLeft { user_id } => {
-                            if let Some(idx) = peers.iter().position(|p| p.user_id == user_id) {
-                                peers.remove(idx);
-                                // Users: index 0 is self, peers start at index 1.
-                                let user_idx = idx + 1;
-                                if user_idx < self.users.len() {
-                                    self.users.remove(user_idx);
-                                }
+                        MirrorEvent::PeerLeft { index, .. } => {
+                            // users[0] is self; peers start at index 1.
+                            let user_idx = index + 1;
+                            if user_idx < self.users.len() {
+                                self.users.remove(user_idx);
                             }
                         }
-                        ServerMsg::ConnectRejected { .. }
-                        | ServerMsg::Ack { .. }
-                        | ServerMsg::Reject { .. } => {}
+                        MirrorEvent::ConnectRejected { .. } => {}
                     }
                 }
             }
@@ -2006,8 +1993,8 @@ mod tests {
             "seeded cell should be visible immediately after new_remote"
         );
         match &app.transport {
-            Transport::Remote { my_user_id, .. } => {
-                assert!(my_user_id.is_some(), "my_user_id should be set")
+            Transport::Remote { mirror, .. } => {
+                assert!(mirror.my_user_id.is_some(), "my_user_id should be set")
             }
             _ => panic!("expected Remote transport"),
         }
