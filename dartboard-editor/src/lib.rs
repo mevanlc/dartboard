@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use dartboard_core::{ops::CellWrite, Canvas, CanvasOp, CellValue, Pos, RgbColor};
 
+pub mod keymap;
+
+pub use keymap::{ActionSpec, BindingContext, KeyBinding, KeyMap, KeyTrigger};
+
 pub const SWATCH_CAPACITY: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1073,31 +1077,6 @@ fn move_for_dir(editor: &mut EditorSession, canvas: &Canvas, dir: MoveDir) {
     }
 }
 
-fn move_dir_for_code(code: AppKeyCode) -> Option<MoveDir> {
-    Some(match code {
-        AppKeyCode::Up => MoveDir::Up,
-        AppKeyCode::Down => MoveDir::Down,
-        AppKeyCode::Left => MoveDir::Left,
-        AppKeyCode::Right => MoveDir::Right,
-        AppKeyCode::Home => MoveDir::LineStart,
-        AppKeyCode::End => MoveDir::LineEnd,
-        AppKeyCode::PageUp => MoveDir::PageUp,
-        AppKeyCode::PageDown => MoveDir::PageDown,
-        _ => return None,
-    })
-}
-
-fn swatch_home_row_index(ch: char) -> Option<usize> {
-    match ch {
-        'a' | 'A' => Some(0),
-        's' | 'S' => Some(1),
-        'd' | 'D' => Some(2),
-        'f' | 'F' => Some(3),
-        'g' | 'G' => Some(4),
-        _ => None,
-    }
-}
-
 fn glyph_anchor(editor: &EditorSession, canvas: &Canvas) -> Pos {
     canvas.glyph_origin(editor.cursor).unwrap_or(editor.cursor)
 }
@@ -1240,7 +1219,7 @@ pub fn handle_editor_key_press(
     color: RgbColor,
 ) -> EditorKeyDispatch {
     let has_anchor = editor.selection_anchor.is_some();
-    match key_to_editor_action(key, editor.mode, has_anchor) {
+    match KeyMap::default_standalone().resolve(key, editor.mode, has_anchor) {
         Some(action) => handle_editor_action(editor, canvas, action, color),
         None => EditorKeyDispatch::default(),
     }
@@ -1319,81 +1298,6 @@ pub fn handle_editor_action(
     EditorKeyDispatch {
         handled: true,
         effects,
-    }
-}
-
-fn key_to_editor_action(
-    key: AppKey,
-    mode: Mode,
-    has_selection_anchor: bool,
-) -> Option<EditorAction> {
-    if key.modifiers.ctrl && key.modifiers.shift {
-        let pan = match key.code {
-            AppKeyCode::Left => Some(EditorAction::Pan { dx: -1, dy: 0 }),
-            AppKeyCode::Right => Some(EditorAction::Pan { dx: 1, dy: 0 }),
-            AppKeyCode::Up => Some(EditorAction::Pan { dx: 0, dy: -1 }),
-            AppKeyCode::Down => Some(EditorAction::Pan { dx: 0, dy: 1 }),
-            _ => None,
-        };
-        if pan.is_some() {
-            return pan;
-        }
-    }
-
-    if key.modifiers.ctrl {
-        return match key.code {
-            AppKeyCode::Backspace | AppKeyCode::Char('h') => Some(EditorAction::PushLeft),
-            AppKeyCode::Char('j') => Some(EditorAction::PushDown),
-            AppKeyCode::Char('k') => Some(EditorAction::PushUp),
-            AppKeyCode::Char('l') => Some(EditorAction::PushRight),
-            AppKeyCode::Char('y') => Some(EditorAction::PullFromLeft),
-            AppKeyCode::Char('u') => Some(EditorAction::PullFromDown),
-            AppKeyCode::Tab | AppKeyCode::Char('i') => Some(EditorAction::PullFromUp),
-            AppKeyCode::Char('o') => Some(EditorAction::PullFromRight),
-            AppKeyCode::Char('c') => Some(EditorAction::CopySelection),
-            AppKeyCode::Char('x') => Some(EditorAction::CutSelection),
-            AppKeyCode::Char('v') => Some(EditorAction::PastePrimarySwatch),
-            AppKeyCode::Char('b') => Some(EditorAction::DrawBorder),
-            AppKeyCode::Char('t') => Some(EditorAction::TransposeSelectionCorner),
-            AppKeyCode::Char(' ') => Some(EditorAction::SmartFill),
-            AppKeyCode::Char(ch) => swatch_home_row_index(ch).map(EditorAction::ActivateSwatch),
-            _ => None,
-        };
-    }
-
-    if key.modifiers.has_alt_like() {
-        return match key.code {
-            AppKeyCode::Char('c') => Some(EditorAction::ExportSystemClipboard),
-            AppKeyCode::Left => Some(EditorAction::Pan { dx: -1, dy: 0 }),
-            AppKeyCode::Right => Some(EditorAction::Pan { dx: 1, dy: 0 }),
-            AppKeyCode::Up => Some(EditorAction::Pan { dx: 0, dy: -1 }),
-            AppKeyCode::Down => Some(EditorAction::Pan { dx: 0, dy: 1 }),
-            _ => None,
-        };
-    }
-
-    if let Some(dir) = move_dir_for_code(key.code) {
-        return Some(EditorAction::Move {
-            dir,
-            extend_selection: key.modifiers.shift,
-        });
-    }
-
-    match key.code {
-        AppKeyCode::Enter => Some(EditorAction::MoveDownLine),
-        AppKeyCode::Esc => Some(EditorAction::ClearSelection),
-        AppKeyCode::Char(ch) if mode.is_selecting() && has_selection_anchor => {
-            Some(EditorAction::FillSelectionOrCell(ch))
-        }
-        AppKeyCode::Backspace | AppKeyCode::Delete
-            if mode.is_selecting() && has_selection_anchor =>
-        {
-            Some(EditorAction::FillSelectionOrCell(' '))
-        }
-        AppKeyCode::Char(ch) => Some(EditorAction::InsertChar(ch)),
-        AppKeyCode::Backspace => Some(EditorAction::Backspace),
-        AppKeyCode::Delete => Some(EditorAction::Delete),
-        _ => None,
     }
 }
 

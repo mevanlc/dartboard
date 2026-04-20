@@ -12,10 +12,11 @@ pub use dartboard_editor::{
     export_system_clipboard_text, fill_bounds, fill_selection, fill_selection_or_cell,
     handle_editor_action, handle_editor_key_press, insert_char, paint_floating_drag,
     paste_primary_swatch, paste_text_block, smart_fill, smart_fill_glyph, stamp_clipboard,
-    stamp_floating, transpose_selection_corner, AppIntent, AppKey, AppKeyCode, AppModifiers,
-    AppPointerButton, AppPointerEvent, AppPointerKind, Bounds, Clipboard, EditorAction,
-    EditorKeyDispatch, EditorSession, FloatingSelection, HostEffect, Mode, MoveDir, PanDrag,
-    Selection, SelectionShape, Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
+    stamp_floating, transpose_selection_corner, ActionSpec, AppIntent, AppKey, AppKeyCode,
+    AppModifiers, AppPointerButton, AppPointerEvent, AppPointerKind, BindingContext, Bounds,
+    Clipboard, EditorAction, EditorKeyDispatch, EditorSession, FloatingSelection, HostEffect,
+    KeyBinding, KeyMap, KeyTrigger, Mode, MoveDir, PanDrag, Selection, SelectionShape, Swatch,
+    SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
 pub use input::{
     app_intent_from_crossterm, app_key_from_crossterm, app_pointer_event_from_crossterm,
