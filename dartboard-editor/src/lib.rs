@@ -494,6 +494,38 @@ impl EditorSession {
         self.pan_drag = None;
     }
 
+    pub fn viewport_contains(&self, col: u16, row: u16) -> bool {
+        let col = col as usize;
+        let row = row as usize;
+        let vx = self.viewport.x as usize;
+        let vy = self.viewport.y as usize;
+        let vw = self.viewport.width as usize;
+        let vh = self.viewport.height as usize;
+        col >= vx && row >= vy && col < vx + vw && row < vy + vh
+    }
+
+    pub fn canvas_pos_for_pointer(
+        &self,
+        col: u16,
+        row: u16,
+        canvas: &Canvas,
+    ) -> Option<Pos> {
+        if !self.viewport_contains(col, row) {
+            return None;
+        }
+        let col = col as usize;
+        let row = row as usize;
+        let vx = self.viewport.x as usize;
+        let vy = self.viewport.y as usize;
+        let cx = self.viewport_origin.x + col - vx;
+        let cy = self.viewport_origin.y + row - vy;
+        if cx < canvas.width && cy < canvas.height {
+            Some(Pos { x: cx, y: cy })
+        } else {
+            None
+        }
+    }
+
     pub fn clamp_cursor(&mut self, canvas: &Canvas) {
         self.cursor.x = self.cursor.x.min(canvas.width.saturating_sub(1));
         self.cursor.y = self.cursor.y.min(canvas.height.saturating_sub(1));
@@ -1311,6 +1343,147 @@ pub fn handle_editor_action(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerStrokeHint {
+    Begin,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EditorPointerDispatch {
+    pub handled: bool,
+    pub stroke_hint: Option<PointerStrokeHint>,
+}
+
+/// Apply a pointer event to the editor, returning whether the event was
+/// handled at the editor layer and any paint-stroke grouping hint the host
+/// should honor for undo bookkeeping.
+///
+/// Hosts should run their own UI hit-testing first (swatch/help/picker
+/// regions) — this handler only drives canvas-level pointer behavior
+/// (floating paint drag, selection drag, viewport pan).
+pub fn handle_editor_pointer(
+    editor: &mut EditorSession,
+    canvas: &mut Canvas,
+    mouse: AppPointerEvent,
+    color: RgbColor,
+) -> EditorPointerDispatch {
+    let canvas_pos = editor.canvas_pos_for_pointer(mouse.column, mouse.row, canvas);
+
+    if editor.floating.is_some() {
+        match mouse.kind {
+            AppPointerKind::Moved => {
+                if let Some(pos) = canvas_pos {
+                    editor.cursor = pos;
+                }
+                return EditorPointerDispatch {
+                    handled: true,
+                    stroke_hint: None,
+                };
+            }
+            AppPointerKind::Down(AppPointerButton::Left) => {
+                if let Some(pos) = canvas_pos {
+                    editor.cursor = pos;
+                    begin_paint_stroke(editor);
+                    paint_floating_drag(editor, canvas, pos, color);
+                    return EditorPointerDispatch {
+                        handled: true,
+                        stroke_hint: Some(PointerStrokeHint::Begin),
+                    };
+                }
+                return EditorPointerDispatch::default();
+            }
+            AppPointerKind::Drag(AppPointerButton::Left) => {
+                if let Some(pos) = canvas_pos {
+                    paint_floating_drag(editor, canvas, pos, color);
+                }
+                return EditorPointerDispatch {
+                    handled: true,
+                    stroke_hint: None,
+                };
+            }
+            AppPointerKind::Up(AppPointerButton::Left) => {
+                end_paint_stroke(editor);
+                return EditorPointerDispatch {
+                    handled: true,
+                    stroke_hint: Some(PointerStrokeHint::End),
+                };
+            }
+            AppPointerKind::Down(AppPointerButton::Right) => {
+                // `dismiss_floating` calls `end_paint_stroke` internally.
+                dismiss_floating(editor);
+                return EditorPointerDispatch {
+                    handled: true,
+                    stroke_hint: Some(PointerStrokeHint::End),
+                };
+            }
+            _ => {
+                return EditorPointerDispatch {
+                    handled: true,
+                    stroke_hint: None,
+                };
+            }
+        }
+    }
+
+    match mouse.kind {
+        AppPointerKind::Down(AppPointerButton::Right) => {
+            if editor.viewport_contains(mouse.column, mouse.row) {
+                editor.begin_pan(mouse.column, mouse.row);
+            }
+        }
+        AppPointerKind::Down(AppPointerButton::Left) => {
+            if let Some(pos) = canvas_pos {
+                let extend_selection =
+                    mouse.modifiers.alt && editor.selection_anchor.is_some();
+                let ellipse_drag = mouse.modifiers.ctrl && !extend_selection;
+
+                if extend_selection {
+                    if let Some(anchor) = editor.selection_anchor {
+                        editor.mode = Mode::Select;
+                        editor.cursor = pos;
+                        editor.drag_origin = Some(anchor);
+                    }
+                } else {
+                    if editor.mode.is_selecting() {
+                        editor.clear_selection();
+                    }
+                    editor.cursor = pos;
+                    editor.selection_shape = if ellipse_drag {
+                        SelectionShape::Ellipse
+                    } else {
+                        SelectionShape::Rect
+                    };
+                    editor.drag_origin = Some(pos);
+                }
+            }
+        }
+        AppPointerKind::Drag(AppPointerButton::Left) => {
+            if let (Some(origin), Some(pos)) = (editor.drag_origin, canvas_pos) {
+                if pos != origin || editor.mode.is_selecting() {
+                    editor.selection_anchor = Some(origin);
+                    editor.mode = Mode::Select;
+                    editor.cursor = pos;
+                }
+            }
+        }
+        AppPointerKind::Drag(AppPointerButton::Right) => {
+            editor.drag_pan(canvas, mouse.column, mouse.row);
+        }
+        AppPointerKind::Up(AppPointerButton::Left) => {
+            editor.drag_origin = None;
+        }
+        AppPointerKind::Up(AppPointerButton::Right) => {
+            editor.end_pan();
+        }
+        _ => {}
+    }
+    EditorPointerDispatch {
+        handled: true,
+        stroke_hint: None,
+    }
+}
+
 pub fn begin_paint_stroke(editor: &mut EditorSession) {
     editor.paint_stroke_anchor = Some(editor.cursor);
     editor.paint_stroke_last = None;
@@ -1487,11 +1660,12 @@ mod tests {
         cut_selection_or_cell, delete_at_cursor, diff_canvas_op, dismiss_floating, draw_border,
         draw_selection_border, export_selection_as_text, export_system_clipboard_text,
         fill_selection, fill_selection_or_cell, handle_editor_action, handle_editor_key_press,
-        insert_char, paint_floating_drag, paste_primary_swatch, paste_text_block, smart_fill,
-        smart_fill_glyph, stamp_clipboard, transpose_selection_corner, AppKey, AppKeyCode,
-        AppModifiers, Bounds, Clipboard, EditorAction, EditorKeyDispatch, EditorSession,
-        FloatingSelection, HostEffect, Mode, MoveDir, Selection, SelectionShape, SwatchActivation,
-        Viewport,
+        handle_editor_pointer, insert_char, paint_floating_drag, paste_primary_swatch,
+        paste_text_block, smart_fill, smart_fill_glyph, stamp_clipboard,
+        transpose_selection_corner, AppKey, AppKeyCode, AppModifiers, AppPointerButton,
+        AppPointerEvent, AppPointerKind, Bounds, Clipboard, EditorAction, EditorKeyDispatch,
+        EditorSession, FloatingSelection, HostEffect, Mode, MoveDir, PointerStrokeHint, Selection,
+        SelectionShape, SwatchActivation, Viewport,
     };
     use dartboard_core::{Canvas, CanvasOp, CellValue, Pos, RgbColor};
 
@@ -2299,5 +2473,168 @@ mod tests {
                 y: origin_before.y - 1,
             }
         );
+    }
+
+    fn pointer(col: u16, row: u16, kind: AppPointerKind) -> AppPointerEvent {
+        AppPointerEvent {
+            column: col,
+            row,
+            kind,
+            modifiers: AppModifiers::default(),
+        }
+    }
+
+    fn viewport_editor(canvas: &Canvas) -> EditorSession {
+        let mut editor = EditorSession::default();
+        editor.set_viewport(
+            Viewport {
+                x: 0,
+                y: 0,
+                width: canvas.width as u16,
+                height: canvas.height as u16,
+            },
+            canvas,
+        );
+        editor
+    }
+
+    #[test]
+    fn pointer_left_down_outside_viewport_is_no_op() {
+        let mut canvas = Canvas::with_size(4, 2);
+        let mut editor = viewport_editor(&canvas);
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(99, 99, AppPointerKind::Down(AppPointerButton::Left)),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert!(dispatch.handled);
+        assert_eq!(dispatch.stroke_hint, None);
+        assert!(editor.drag_origin.is_none());
+    }
+
+    #[test]
+    fn pointer_non_floating_left_down_arms_selection_drag() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(3, 2, AppPointerKind::Down(AppPointerButton::Left)),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert!(dispatch.handled);
+        assert_eq!(dispatch.stroke_hint, None);
+        assert_eq!(editor.cursor, Pos { x: 3, y: 2 });
+        assert_eq!(editor.drag_origin, Some(Pos { x: 3, y: 2 }));
+    }
+
+    #[test]
+    fn pointer_non_floating_right_down_begins_pan_inside_viewport() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(2, 1, AppPointerKind::Down(AppPointerButton::Right)),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert!(dispatch.handled);
+        assert!(editor.pan_drag.is_some());
+    }
+
+    #[test]
+    fn pointer_non_floating_left_drag_establishes_selection() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+
+        handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(2, 1, AppPointerKind::Down(AppPointerButton::Left)),
+            RgbColor::new(0, 0, 0),
+        );
+        handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(5, 2, AppPointerKind::Drag(AppPointerButton::Left)),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(editor.selection_anchor, Some(Pos { x: 2, y: 1 }));
+        assert_eq!(editor.cursor, Pos { x: 5, y: 2 });
+        assert!(editor.mode.is_selecting());
+    }
+
+    #[test]
+    fn pointer_floating_left_down_begins_stroke_and_paints() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+        editor.floating = Some(FloatingSelection {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('x'))]),
+            transparent: false,
+            source_index: None,
+        });
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(3, 1, AppPointerKind::Down(AppPointerButton::Left)),
+            RgbColor::new(1, 2, 3),
+        );
+
+        assert_eq!(dispatch.stroke_hint, Some(PointerStrokeHint::Begin));
+        assert_eq!(editor.cursor, Pos { x: 3, y: 1 });
+        assert!(editor.paint_stroke_anchor.is_some());
+        assert_eq!(canvas.cell(Pos { x: 3, y: 1 }), Some(CellValue::Narrow('x')));
+    }
+
+    #[test]
+    fn pointer_floating_left_up_ends_stroke() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+        editor.floating = Some(FloatingSelection {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('x'))]),
+            transparent: false,
+            source_index: None,
+        });
+        editor.paint_stroke_anchor = Some(Pos { x: 0, y: 0 });
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(3, 1, AppPointerKind::Up(AppPointerButton::Left)),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.stroke_hint, Some(PointerStrokeHint::End));
+        assert!(editor.paint_stroke_anchor.is_none());
+    }
+
+    #[test]
+    fn pointer_floating_right_down_dismisses_and_ends_stroke() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+        editor.floating = Some(FloatingSelection {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('x'))]),
+            transparent: false,
+            source_index: None,
+        });
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(3, 1, AppPointerKind::Down(AppPointerButton::Right)),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.stroke_hint, Some(PointerStrokeHint::End));
+        assert!(editor.floating.is_none());
     }
 }

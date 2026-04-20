@@ -20,16 +20,16 @@ use dartboard_editor::{
     paste_primary_swatch as editor_paste_primary_swatch, smart_fill as editor_smart_fill,
 };
 use dartboard_editor::{
-    begin_paint_stroke as editor_begin_paint_stroke, diff_canvas_op as editor_diff_canvas_op,
-    dismiss_floating as editor_dismiss_floating, end_paint_stroke as editor_end_paint_stroke,
-    handle_editor_action as editor_handle_action, insert_char as editor_insert_char,
-    paint_floating_drag as editor_paint_floating_drag, paste_text_block as editor_paste_text_block,
-    stamp_floating as editor_stamp_floating, MirrorEvent, SessionMirror,
+    diff_canvas_op as editor_diff_canvas_op, dismiss_floating as editor_dismiss_floating,
+    end_paint_stroke as editor_end_paint_stroke,
+    handle_editor_action as editor_handle_action, handle_editor_pointer as editor_handle_pointer,
+    insert_char as editor_insert_char, paste_text_block as editor_paste_text_block,
+    stamp_floating as editor_stamp_floating, MirrorEvent, PointerStrokeHint, SessionMirror,
 };
 pub use dartboard_editor::{
-    Clipboard, ConnectState, EditorAction, EditorContext, EditorSession, FloatingSelection,
-    HostEffect, KeyMap, Mode, MoveDir, PanDrag, Selection, SelectionShape, Swatch,
-    SwatchActivation, Viewport, SWATCH_CAPACITY,
+    Clipboard, ConnectState, EditorAction, EditorContext, EditorPointerDispatch, EditorSession,
+    FloatingSelection, HostEffect, KeyMap, Mode, MoveDir, PanDrag, Selection, SelectionShape,
+    Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
@@ -614,22 +614,10 @@ impl App {
         self.with_editor_session_mut(|editor, canvas| editor.move_down(canvas));
     }
 
+    #[cfg(test)]
     fn mouse_to_canvas(&self, col: u16, row: u16) -> Option<Pos> {
-        let col = col as usize;
-        let row = row as usize;
-        let vx = self.viewport.x as usize;
-        let vy = self.viewport.y as usize;
-        let vw = self.viewport.width as usize;
-        let vh = self.viewport.height as usize;
-
-        if col >= vx && row >= vy && col < vx + vw && row < vy + vh {
-            let cx = self.viewport_origin.x + col - vx;
-            let cy = self.viewport_origin.y + row - vy;
-            if cx < self.canvas.width && cy < self.canvas.height {
-                return Some(Pos { x: cx, y: cy });
-            }
-        }
-        None
+        self.editor_session_snapshot()
+            .canvas_pos_for_pointer(col, row, &self.canvas)
     }
 
     fn swatch_hit(&self, col: u16, row: u16) -> Option<(usize, SwatchZone)> {
@@ -658,17 +646,6 @@ impl App {
         None
     }
 
-    fn viewport_contains(&self, col: u16, row: u16) -> bool {
-        let col = col as usize;
-        let row = row as usize;
-        let vx = self.viewport.x as usize;
-        let vy = self.viewport.y as usize;
-        let vw = self.viewport.width as usize;
-        let vh = self.viewport.height as usize;
-
-        col >= vx && row >= vy && col < vx + vw && row < vy + vh
-    }
-
     pub fn set_viewport(&mut self, viewport: Rect) {
         let viewport = Self::viewport_to_editor(viewport);
         self.with_editor_session_mut(|editor, canvas| editor.set_viewport(viewport, canvas));
@@ -679,22 +656,11 @@ impl App {
         self.with_editor_session_mut(|editor, canvas| editor.pan_by(canvas, dx, dy));
     }
 
-    fn begin_pan(&mut self, col: u16, row: u16) {
-        self.with_editor_session_mut(|editor, _| editor.begin_pan(col, row));
-    }
-
-    fn drag_pan(&mut self, col: u16, row: u16) {
-        self.with_editor_session_mut(|editor, canvas| editor.drag_pan(canvas, col, row));
-    }
-
-    fn end_pan(&mut self) {
-        self.with_editor_session_mut(|editor, _| editor.end_pan());
-    }
-
     fn clamp_cursor(&mut self) {
         self.with_editor_session_mut(|editor, canvas| editor.clamp_cursor(canvas));
     }
 
+    #[cfg(test)]
     fn clear_selection(&mut self) {
         self.with_editor_session_mut(|editor, _| editor.clear_selection());
     }
@@ -754,11 +720,6 @@ impl App {
         }
     }
 
-    fn begin_paint_stroke(&mut self) {
-        self.paint_canvas_before = Some(self.canvas.clone());
-        self.with_editor_session_mut(|editor, _| editor_begin_paint_stroke(editor));
-    }
-
     fn end_paint_stroke(&mut self) {
         if let Some(before) = self.paint_canvas_before.take() {
             if self.canvas != before {
@@ -777,16 +738,6 @@ impl App {
         self.with_editor_session_mut(|editor, _| editor_dismiss_floating(editor));
     }
 
-    fn paint_floating_drag(&mut self, raw_pos: Pos) {
-        let color = self.active_user_color();
-        let before = self.canvas.clone();
-        let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
-            editor_paint_floating_drag(editor, canvas, raw_pos, color)
-        });
-        if changed {
-            self.finish_canvas_edit(before);
-        }
-    }
 
     #[cfg(test)]
     fn paste_clipboard(&mut self) {
@@ -1199,88 +1150,24 @@ impl App {
             }
         }
 
-        let canvas_pos = self.mouse_to_canvas(mouse.column, mouse.row);
+        let color = self.active_user_color();
+        let before = self.canvas.clone();
+        let dispatch = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_handle_pointer(editor, canvas, mouse, color)
+        });
 
-        if self.floating.is_some() {
-            match mouse.kind {
-                AppPointerKind::Moved => {
-                    if let Some(pos) = canvas_pos {
-                        self.cursor = pos;
-                    }
-                }
-                AppPointerKind::Down(AppPointerButton::Left) => {
-                    if let Some(pos) = canvas_pos {
-                        self.cursor = pos;
-                        self.begin_paint_stroke();
-                        self.paint_floating_drag(pos);
-                    }
-                }
-                AppPointerKind::Drag(AppPointerButton::Left) => {
-                    if let Some(pos) = canvas_pos {
-                        self.paint_floating_drag(pos);
-                    }
-                }
-                AppPointerKind::Up(AppPointerButton::Left) => {
-                    self.end_paint_stroke();
-                }
-                AppPointerKind::Down(AppPointerButton::Right) => {
-                    self.dismiss_floating();
-                }
-                _ => {}
-            }
-            return;
+        // A stroke's undo snapshot is the canvas BEFORE the Down event
+        // painted anything; capture from the pre-event clone here.
+        if matches!(dispatch.stroke_hint, Some(PointerStrokeHint::Begin)) {
+            self.paint_canvas_before = Some(before.clone());
         }
 
-        match mouse.kind {
-            AppPointerKind::Down(AppPointerButton::Right) => {
-                if self.viewport_contains(mouse.column, mouse.row) {
-                    self.begin_pan(mouse.column, mouse.row);
-                }
-            }
-            AppPointerKind::Down(AppPointerButton::Left) => {
-                if let Some(pos) = canvas_pos {
-                    let extend_selection = mouse.modifiers.alt && self.selection_anchor.is_some();
-                    let ellipse_drag = mouse.modifiers.ctrl && !extend_selection;
+        if self.canvas != before {
+            self.finish_canvas_edit(before);
+        }
 
-                    if extend_selection {
-                        if let Some(anchor) = self.selection_anchor {
-                            self.mode = Mode::Select;
-                            self.cursor = pos;
-                            self.drag_origin = Some(anchor);
-                        }
-                    } else {
-                        if self.mode.is_selecting() {
-                            self.clear_selection();
-                        }
-                        self.cursor = pos;
-                        self.selection_shape = if ellipse_drag {
-                            SelectionShape::Ellipse
-                        } else {
-                            SelectionShape::Rect
-                        };
-                        self.drag_origin = Some(pos);
-                    }
-                }
-            }
-            AppPointerKind::Drag(AppPointerButton::Left) => {
-                if let (Some(origin), Some(pos)) = (self.drag_origin, canvas_pos) {
-                    if pos != origin || self.mode.is_selecting() {
-                        self.selection_anchor = Some(origin);
-                        self.mode = Mode::Select;
-                        self.cursor = pos;
-                    }
-                }
-            }
-            AppPointerKind::Drag(AppPointerButton::Right) => {
-                self.drag_pan(mouse.column, mouse.row);
-            }
-            AppPointerKind::Up(AppPointerButton::Left) => {
-                self.drag_origin = None;
-            }
-            AppPointerKind::Up(AppPointerButton::Right) => {
-                self.end_pan();
-            }
-            _ => {}
+        if matches!(dispatch.stroke_hint, Some(PointerStrokeHint::End)) {
+            self.end_paint_stroke();
         }
     }
 
