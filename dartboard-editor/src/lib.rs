@@ -1,3 +1,34 @@
+//! # dartboard-editor
+//!
+//! Host-neutral editor state and dispatch for the dartboard terminal drawing
+//! tool. This crate has no terminal-I/O dependencies — hosts construct
+//! [`AppIntent`] values from their own input layer and feed them to the
+//! editor.
+//!
+//! ## Host wiring
+//!
+//! 1. Own an [`EditorSession`] and a [`dartboard_core::Canvas`].
+//! 2. Translate your host's input events into [`AppKey`] and
+//!    [`AppPointerEvent`]. Pointer coordinates are 0-based cell positions
+//!    in the host's display grid; the host is responsible for any terminal
+//!    protocol conversion (e.g., SGR 1-based → 0-based).
+//! 3. Route key input through [`KeyMap::resolve`] plus [`handle_editor_action`]
+//!    (or [`handle_editor_key_press`] for the default keymap path).
+//! 4. Route pointer input through [`handle_editor_pointer`]; if your host
+//!    has overlay UI (swatches, menus), hit-test those first and only
+//!    forward events that should reach the editor. Use
+//!    [`EditorSession::viewport_contains`] for canvas hit-testing.
+//! 5. Inspect [`EditorPointerDispatch::outcome`]:
+//!    [`PointerOutcome::Consumed`] means suppress outer UI;
+//!    [`PointerOutcome::Passthrough`] means the editor did not act on the
+//!    event and the host may bubble it to outer layers.
+//! 6. Pass [`PointerOptions`] to [`handle_editor_pointer_with`] when the
+//!    host wants to opt out of hover tracking or tune other knobs.
+//!
+//! Crossterm adapters for the reference CLI live in the `dartboard-cli`
+//! crate. Non-crossterm hosts (e.g., VTE-based shells) construct
+//! [`AppIntent`] values directly from their own parsed events.
+
 use std::collections::HashSet;
 
 use dartboard_core::{ops::CellWrite, Canvas, CanvasOp, CellValue, Pos, RgbColor};
@@ -75,6 +106,11 @@ pub enum AppPointerKind {
     ScrollDown,
 }
 
+/// A pointer event in the host's display grid.
+///
+/// `column` and `row` are 0-based cell coordinates; hosts that receive
+/// 1-based terminal coordinates (e.g., SGR mouse reports) must normalize
+/// before constructing this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppPointerEvent {
     pub column: u16,
@@ -1349,79 +1385,154 @@ pub enum PointerStrokeHint {
     End,
 }
 
+/// Whether [`handle_editor_pointer`] consumed the event or left it for the
+/// host to bubble to outer UI layers.
+///
+/// Hosts that embed the editor as a widget alongside other clickable UI
+/// (swatches, menus, other panes) should treat `Passthrough` as a signal
+/// that the pointer event is still available for outer routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerOutcome {
+    /// The editor acted on the event. Suppress outer UI routing.
+    Consumed,
+    /// The editor did not act on the event (e.g., click outside the
+    /// canvas viewport, scroll event today, mid-drag sample without an
+    /// active drag origin). The host may bubble this event to outer UI.
+    #[default]
+    Passthrough,
+}
+
+impl PointerOutcome {
+    pub fn is_consumed(self) -> bool {
+        matches!(self, PointerOutcome::Consumed)
+    }
+
+    pub fn is_passthrough(self) -> bool {
+        matches!(self, PointerOutcome::Passthrough)
+    }
+}
+
+/// Host-selectable pointer-handling knobs. Construct with `Default` and
+/// flip individual fields to opt out of specific behaviors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerOptions {
+    /// If `true`, [`AppPointerKind::Moved`] events track the cursor in
+    /// the canvas (useful for floating-selection preview). Hosts that
+    /// receive a lot of passive mouse motion (e.g., VTE-based shells
+    /// with a canvas embedded in larger chrome) can set this to `false`
+    /// to suppress hover tracking without filtering events before
+    /// dispatch. Default: `true`.
+    pub track_hover: bool,
+}
+
+impl Default for PointerOptions {
+    fn default() -> Self {
+        Self { track_hover: true }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EditorPointerDispatch {
-    pub handled: bool,
+    pub outcome: PointerOutcome,
     pub stroke_hint: Option<PointerStrokeHint>,
 }
 
-/// Apply a pointer event to the editor, returning whether the event was
-/// handled at the editor layer and any paint-stroke grouping hint the host
-/// should honor for undo bookkeeping.
+impl EditorPointerDispatch {
+    fn consumed() -> Self {
+        Self {
+            outcome: PointerOutcome::Consumed,
+            stroke_hint: None,
+        }
+    }
+
+    fn consumed_with(stroke_hint: PointerStrokeHint) -> Self {
+        Self {
+            outcome: PointerOutcome::Consumed,
+            stroke_hint: Some(stroke_hint),
+        }
+    }
+}
+
+/// Apply a pointer event to the editor using default [`PointerOptions`].
 ///
-/// Hosts should run their own UI hit-testing first (swatch/help/picker
-/// regions) — this handler only drives canvas-level pointer behavior
-/// (floating paint drag, selection drag, viewport pan).
+/// See [`handle_editor_pointer_with`] for the full contract and for
+/// host-selectable knobs like hover tracking.
 pub fn handle_editor_pointer(
     editor: &mut EditorSession,
     canvas: &mut Canvas,
     mouse: AppPointerEvent,
     color: RgbColor,
 ) -> EditorPointerDispatch {
+    handle_editor_pointer_with(editor, canvas, mouse, color, PointerOptions::default())
+}
+
+/// Apply a pointer event to the editor and return the dispatch outcome
+/// plus any paint-stroke grouping hint the host should honor for undo
+/// bookkeeping.
+///
+/// Hosts should run their own UI hit-testing first (swatch/help/picker
+/// regions) — this handler only drives canvas-level pointer behavior
+/// (floating paint drag, selection drag, viewport pan).
+///
+/// The returned [`PointerOutcome`] distinguishes events the editor
+/// consumed (suppress outer routing) from events that should bubble.
+pub fn handle_editor_pointer_with(
+    editor: &mut EditorSession,
+    canvas: &mut Canvas,
+    mouse: AppPointerEvent,
+    color: RgbColor,
+    options: PointerOptions,
+) -> EditorPointerDispatch {
     let canvas_pos = editor.canvas_pos_for_pointer(mouse.column, mouse.row, canvas);
 
     if editor.floating.is_some() {
         match mouse.kind {
             AppPointerKind::Moved => {
+                if !options.track_hover {
+                    return EditorPointerDispatch::default();
+                }
                 if let Some(pos) = canvas_pos {
                     editor.cursor = pos;
+                    return EditorPointerDispatch::consumed();
                 }
-                return EditorPointerDispatch {
-                    handled: true,
-                    stroke_hint: None,
-                };
+                return EditorPointerDispatch::default();
             }
             AppPointerKind::Down(AppPointerButton::Left) => {
                 if let Some(pos) = canvas_pos {
                     editor.cursor = pos;
                     begin_paint_stroke(editor);
                     paint_floating_drag(editor, canvas, pos, color);
-                    return EditorPointerDispatch {
-                        handled: true,
-                        stroke_hint: Some(PointerStrokeHint::Begin),
-                    };
+                    return EditorPointerDispatch::consumed_with(PointerStrokeHint::Begin);
                 }
                 return EditorPointerDispatch::default();
             }
             AppPointerKind::Drag(AppPointerButton::Left) => {
                 if let Some(pos) = canvas_pos {
                     paint_floating_drag(editor, canvas, pos, color);
+                    return EditorPointerDispatch::consumed();
                 }
-                return EditorPointerDispatch {
-                    handled: true,
-                    stroke_hint: None,
-                };
+                // Mid-stroke sample outside the canvas: the stroke is still
+                // active, so keep the event from bubbling.
+                if editor.paint_stroke_anchor.is_some() {
+                    return EditorPointerDispatch::consumed();
+                }
+                return EditorPointerDispatch::default();
             }
             AppPointerKind::Up(AppPointerButton::Left) => {
+                let had_stroke = editor.paint_stroke_anchor.is_some();
                 end_paint_stroke(editor);
-                return EditorPointerDispatch {
-                    handled: true,
-                    stroke_hint: Some(PointerStrokeHint::End),
-                };
+                if had_stroke {
+                    return EditorPointerDispatch::consumed_with(PointerStrokeHint::End);
+                }
+                return EditorPointerDispatch::default();
             }
             AppPointerKind::Down(AppPointerButton::Right) => {
                 // `dismiss_floating` calls `end_paint_stroke` internally.
                 dismiss_floating(editor);
-                return EditorPointerDispatch {
-                    handled: true,
-                    stroke_hint: Some(PointerStrokeHint::End),
-                };
+                return EditorPointerDispatch::consumed_with(PointerStrokeHint::End);
             }
             _ => {
-                return EditorPointerDispatch {
-                    handled: true,
-                    stroke_hint: None,
-                };
+                return EditorPointerDispatch::default();
             }
         }
     }
@@ -1430,33 +1541,36 @@ pub fn handle_editor_pointer(
         AppPointerKind::Down(AppPointerButton::Right) => {
             if editor.viewport_contains(mouse.column, mouse.row) {
                 editor.begin_pan(mouse.column, mouse.row);
+                return EditorPointerDispatch::consumed();
             }
+            EditorPointerDispatch::default()
         }
         AppPointerKind::Down(AppPointerButton::Left) => {
-            if let Some(pos) = canvas_pos {
-                let extend_selection =
-                    mouse.modifiers.alt && editor.selection_anchor.is_some();
-                let ellipse_drag = mouse.modifiers.ctrl && !extend_selection;
+            let Some(pos) = canvas_pos else {
+                return EditorPointerDispatch::default();
+            };
+            let extend_selection = mouse.modifiers.alt && editor.selection_anchor.is_some();
+            let ellipse_drag = mouse.modifiers.ctrl && !extend_selection;
 
-                if extend_selection {
-                    if let Some(anchor) = editor.selection_anchor {
-                        editor.mode = Mode::Select;
-                        editor.cursor = pos;
-                        editor.drag_origin = Some(anchor);
-                    }
-                } else {
-                    if editor.mode.is_selecting() {
-                        editor.clear_selection();
-                    }
+            if extend_selection {
+                if let Some(anchor) = editor.selection_anchor {
+                    editor.mode = Mode::Select;
                     editor.cursor = pos;
-                    editor.selection_shape = if ellipse_drag {
-                        SelectionShape::Ellipse
-                    } else {
-                        SelectionShape::Rect
-                    };
-                    editor.drag_origin = Some(pos);
+                    editor.drag_origin = Some(anchor);
                 }
+            } else {
+                if editor.mode.is_selecting() {
+                    editor.clear_selection();
+                }
+                editor.cursor = pos;
+                editor.selection_shape = if ellipse_drag {
+                    SelectionShape::Ellipse
+                } else {
+                    SelectionShape::Rect
+                };
+                editor.drag_origin = Some(pos);
             }
+            EditorPointerDispatch::consumed()
         }
         AppPointerKind::Drag(AppPointerButton::Left) => {
             if let (Some(origin), Some(pos)) = (editor.drag_origin, canvas_pos) {
@@ -1465,22 +1579,31 @@ pub fn handle_editor_pointer(
                     editor.mode = Mode::Select;
                     editor.cursor = pos;
                 }
+                return EditorPointerDispatch::consumed();
             }
+            EditorPointerDispatch::default()
         }
         AppPointerKind::Drag(AppPointerButton::Right) => {
-            editor.drag_pan(canvas, mouse.column, mouse.row);
+            if editor.pan_drag.is_some() {
+                editor.drag_pan(canvas, mouse.column, mouse.row);
+                return EditorPointerDispatch::consumed();
+            }
+            EditorPointerDispatch::default()
         }
         AppPointerKind::Up(AppPointerButton::Left) => {
-            editor.drag_origin = None;
+            if editor.drag_origin.take().is_some() {
+                return EditorPointerDispatch::consumed();
+            }
+            EditorPointerDispatch::default()
         }
         AppPointerKind::Up(AppPointerButton::Right) => {
-            editor.end_pan();
+            if editor.pan_drag.is_some() {
+                editor.end_pan();
+                return EditorPointerDispatch::consumed();
+            }
+            EditorPointerDispatch::default()
         }
-        _ => {}
-    }
-    EditorPointerDispatch {
-        handled: true,
-        stroke_hint: None,
+        _ => EditorPointerDispatch::default(),
     }
 }
 
@@ -1660,12 +1783,12 @@ mod tests {
         cut_selection_or_cell, delete_at_cursor, diff_canvas_op, dismiss_floating, draw_border,
         draw_selection_border, export_selection_as_text, export_system_clipboard_text,
         fill_selection, fill_selection_or_cell, handle_editor_action, handle_editor_key_press,
-        handle_editor_pointer, insert_char, paint_floating_drag, paste_primary_swatch,
-        paste_text_block, smart_fill, smart_fill_glyph, stamp_clipboard,
+        handle_editor_pointer, handle_editor_pointer_with, insert_char, paint_floating_drag,
+        paste_primary_swatch, paste_text_block, smart_fill, smart_fill_glyph, stamp_clipboard,
         transpose_selection_corner, AppKey, AppKeyCode, AppModifiers, AppPointerButton,
         AppPointerEvent, AppPointerKind, Bounds, Clipboard, EditorAction, EditorKeyDispatch,
-        EditorSession, FloatingSelection, HostEffect, Mode, MoveDir, PointerStrokeHint, Selection,
-        SelectionShape, SwatchActivation, Viewport,
+        EditorSession, FloatingSelection, HostEffect, Mode, MoveDir, PointerOptions,
+        PointerOutcome, PointerStrokeHint, Selection, SelectionShape, SwatchActivation, Viewport,
     };
     use dartboard_core::{Canvas, CanvasOp, CellValue, Pos, RgbColor};
 
@@ -2499,7 +2622,7 @@ mod tests {
     }
 
     #[test]
-    fn pointer_left_down_outside_viewport_is_no_op() {
+    fn pointer_left_down_outside_viewport_passes_through() {
         let mut canvas = Canvas::with_size(4, 2);
         let mut editor = viewport_editor(&canvas);
 
@@ -2510,7 +2633,7 @@ mod tests {
             RgbColor::new(0, 0, 0),
         );
 
-        assert!(dispatch.handled);
+        assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
         assert_eq!(dispatch.stroke_hint, None);
         assert!(editor.drag_origin.is_none());
     }
@@ -2527,7 +2650,7 @@ mod tests {
             RgbColor::new(0, 0, 0),
         );
 
-        assert!(dispatch.handled);
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
         assert_eq!(dispatch.stroke_hint, None);
         assert_eq!(editor.cursor, Pos { x: 3, y: 2 });
         assert_eq!(editor.drag_origin, Some(Pos { x: 3, y: 2 }));
@@ -2545,8 +2668,100 @@ mod tests {
             RgbColor::new(0, 0, 0),
         );
 
-        assert!(dispatch.handled);
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
         assert!(editor.pan_drag.is_some());
+    }
+
+    #[test]
+    fn pointer_right_down_outside_viewport_passes_through() {
+        let mut canvas = Canvas::with_size(4, 2);
+        let mut editor = viewport_editor(&canvas);
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(99, 99, AppPointerKind::Down(AppPointerButton::Right)),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
+        assert!(editor.pan_drag.is_none());
+    }
+
+    #[test]
+    fn pointer_scroll_event_passes_through() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(3, 2, AppPointerKind::ScrollUp),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
+    }
+
+    #[test]
+    fn pointer_moved_without_floating_passes_through() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(3, 2, AppPointerKind::Moved),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
+    }
+
+    #[test]
+    fn pointer_floating_hover_tracks_cursor_by_default() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+        editor.floating = Some(FloatingSelection {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('x'))]),
+            transparent: false,
+            source_index: None,
+        });
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(4, 2, AppPointerKind::Moved),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
+        assert_eq!(editor.cursor, Pos { x: 4, y: 2 });
+    }
+
+    #[test]
+    fn pointer_floating_hover_suppressed_when_track_hover_disabled() {
+        let mut canvas = Canvas::with_size(8, 4);
+        let mut editor = viewport_editor(&canvas);
+        let initial_cursor = editor.cursor;
+        editor.floating = Some(FloatingSelection {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('x'))]),
+            transparent: false,
+            source_index: None,
+        });
+
+        let dispatch = handle_editor_pointer_with(
+            &mut editor,
+            &mut canvas,
+            pointer(4, 2, AppPointerKind::Moved),
+            RgbColor::new(0, 0, 0),
+            PointerOptions {
+                track_hover: false,
+            },
+        );
+
+        assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
+        assert_eq!(editor.cursor, initial_cursor);
     }
 
     #[test]
@@ -2589,6 +2804,7 @@ mod tests {
             RgbColor::new(1, 2, 3),
         );
 
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
         assert_eq!(dispatch.stroke_hint, Some(PointerStrokeHint::Begin));
         assert_eq!(editor.cursor, Pos { x: 3, y: 1 });
         assert!(editor.paint_stroke_anchor.is_some());
@@ -2613,6 +2829,7 @@ mod tests {
             RgbColor::new(0, 0, 0),
         );
 
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
         assert_eq!(dispatch.stroke_hint, Some(PointerStrokeHint::End));
         assert!(editor.paint_stroke_anchor.is_none());
     }
@@ -2634,6 +2851,7 @@ mod tests {
             RgbColor::new(0, 0, 0),
         );
 
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
         assert_eq!(dispatch.stroke_hint, Some(PointerStrokeHint::End));
         assert!(editor.floating.is_none());
     }
