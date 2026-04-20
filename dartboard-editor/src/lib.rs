@@ -97,6 +97,50 @@ pub struct EditorKeyDispatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDir {
+    Left,
+    Right,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    PageUp,
+    PageDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorAction {
+    Move { dir: MoveDir, extend_selection: bool },
+    MoveDownLine,
+    Pan { dx: isize, dy: isize },
+    ClearSelection,
+    TransposeSelectionCorner,
+
+    PushLeft,
+    PushRight,
+    PushUp,
+    PushDown,
+    PullFromLeft,
+    PullFromRight,
+    PullFromUp,
+    PullFromDown,
+
+    CopySelection,
+    CutSelection,
+    PastePrimarySwatch,
+    ExportSystemClipboard,
+    ActivateSwatch(usize),
+
+    SmartFill,
+    DrawBorder,
+    FillSelectionOrCell(char),
+
+    InsertChar(char),
+    Backspace,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Draw,
     Select,
@@ -1016,19 +1060,31 @@ fn move_to_bottom_edge(editor: &mut EditorSession, canvas: &Canvas) {
     editor.cursor.y = editor.visible_bounds(canvas).max_y;
 }
 
-fn move_for_key(editor: &mut EditorSession, canvas: &Canvas, code: AppKeyCode) -> bool {
-    match code {
-        AppKeyCode::Up => editor.move_up(canvas),
-        AppKeyCode::Down => editor.move_down(canvas),
-        AppKeyCode::Left => editor.move_left(canvas),
-        AppKeyCode::Right => editor.move_right(canvas),
-        AppKeyCode::Home => move_to_left_edge(editor, canvas),
-        AppKeyCode::End => move_to_right_edge(editor, canvas),
-        AppKeyCode::PageUp => move_to_top_edge(editor, canvas),
-        AppKeyCode::PageDown => move_to_bottom_edge(editor, canvas),
-        _ => return false,
+fn move_for_dir(editor: &mut EditorSession, canvas: &Canvas, dir: MoveDir) {
+    match dir {
+        MoveDir::Up => editor.move_up(canvas),
+        MoveDir::Down => editor.move_down(canvas),
+        MoveDir::Left => editor.move_left(canvas),
+        MoveDir::Right => editor.move_right(canvas),
+        MoveDir::LineStart => move_to_left_edge(editor, canvas),
+        MoveDir::LineEnd => move_to_right_edge(editor, canvas),
+        MoveDir::PageUp => move_to_top_edge(editor, canvas),
+        MoveDir::PageDown => move_to_bottom_edge(editor, canvas),
     }
-    true
+}
+
+fn move_dir_for_code(code: AppKeyCode) -> Option<MoveDir> {
+    Some(match code {
+        AppKeyCode::Up => MoveDir::Up,
+        AppKeyCode::Down => MoveDir::Down,
+        AppKeyCode::Left => MoveDir::Left,
+        AppKeyCode::Right => MoveDir::Right,
+        AppKeyCode::Home => MoveDir::LineStart,
+        AppKeyCode::End => MoveDir::LineEnd,
+        AppKeyCode::PageUp => MoveDir::PageUp,
+        AppKeyCode::PageDown => MoveDir::PageDown,
+        _ => return None,
+    })
 }
 
 fn swatch_home_row_index(ch: char) -> Option<usize> {
@@ -1183,166 +1239,161 @@ pub fn handle_editor_key_press(
     key: AppKey,
     color: RgbColor,
 ) -> EditorKeyDispatch {
+    let has_anchor = editor.selection_anchor.is_some();
+    match key_to_editor_action(key, editor.mode, has_anchor) {
+        Some(action) => handle_editor_action(editor, canvas, action, color),
+        None => EditorKeyDispatch::default(),
+    }
+}
+
+pub fn handle_editor_action(
+    editor: &mut EditorSession,
+    canvas: &mut Canvas,
+    action: EditorAction,
+    color: RgbColor,
+) -> EditorKeyDispatch {
+    let mut effects = Vec::new();
+    match action {
+        EditorAction::Move {
+            dir,
+            extend_selection,
+        } => {
+            if extend_selection {
+                editor.begin_selection();
+            } else if editor.mode.is_selecting() {
+                editor.clear_selection();
+            }
+            move_for_dir(editor, canvas, dir);
+        }
+        EditorAction::MoveDownLine => editor.move_down(canvas),
+        EditorAction::Pan { dx, dy } => editor.pan_by(canvas, dx, dy),
+        EditorAction::ClearSelection => editor.clear_selection(),
+        EditorAction::TransposeSelectionCorner => {
+            return EditorKeyDispatch {
+                handled: transpose_selection_corner(editor),
+                effects: Vec::new(),
+            };
+        }
+        EditorAction::PushLeft => push_left(editor, canvas),
+        EditorAction::PushRight => push_right(editor, canvas),
+        EditorAction::PushUp => push_up(editor, canvas),
+        EditorAction::PushDown => push_down(editor, canvas),
+        EditorAction::PullFromLeft => pull_from_left(editor, canvas),
+        EditorAction::PullFromRight => pull_from_right(editor, canvas),
+        EditorAction::PullFromUp => pull_from_up(editor, canvas),
+        EditorAction::PullFromDown => pull_from_down(editor, canvas),
+        EditorAction::CopySelection => {
+            let _ = copy_selection_or_cell(editor, canvas);
+        }
+        EditorAction::CutSelection => {
+            let _ = cut_selection_or_cell(editor, canvas, color);
+        }
+        EditorAction::PastePrimarySwatch => {
+            let _ = paste_primary_swatch(editor, canvas, color);
+        }
+        EditorAction::ExportSystemClipboard => {
+            effects.push(HostEffect::CopyToClipboard(export_system_clipboard_text(
+                editor, canvas,
+            )));
+        }
+        EditorAction::ActivateSwatch(idx) => {
+            editor.activate_swatch(idx);
+        }
+        EditorAction::SmartFill => smart_fill(editor, canvas, color),
+        EditorAction::DrawBorder => {
+            let _ = draw_selection_border(editor, canvas, color);
+        }
+        EditorAction::FillSelectionOrCell(ch) => {
+            fill_selection_or_cell(editor, canvas, ch, color);
+        }
+        EditorAction::InsertChar(ch) => {
+            let _ = insert_char(editor, canvas, ch, color);
+        }
+        EditorAction::Backspace => {
+            let _ = backspace(editor, canvas);
+        }
+        EditorAction::Delete => {
+            let _ = delete_at_cursor(editor, canvas);
+        }
+    }
+    EditorKeyDispatch {
+        handled: true,
+        effects,
+    }
+}
+
+fn key_to_editor_action(
+    key: AppKey,
+    mode: Mode,
+    has_selection_anchor: bool,
+) -> Option<EditorAction> {
+    if key.modifiers.ctrl && key.modifiers.shift {
+        let pan = match key.code {
+            AppKeyCode::Left => Some(EditorAction::Pan { dx: -1, dy: 0 }),
+            AppKeyCode::Right => Some(EditorAction::Pan { dx: 1, dy: 0 }),
+            AppKeyCode::Up => Some(EditorAction::Pan { dx: 0, dy: -1 }),
+            AppKeyCode::Down => Some(EditorAction::Pan { dx: 0, dy: 1 }),
+            _ => None,
+        };
+        if pan.is_some() {
+            return pan;
+        }
+    }
+
     if key.modifiers.ctrl {
-        if key.modifiers.shift {
-            match key.code {
-                AppKeyCode::Left => {
-                    editor.pan_by(canvas, -1, 0);
-                    return EditorKeyDispatch {
-                        handled: true,
-                        effects: Vec::new(),
-                    };
-                }
-                AppKeyCode::Right => {
-                    editor.pan_by(canvas, 1, 0);
-                    return EditorKeyDispatch {
-                        handled: true,
-                        effects: Vec::new(),
-                    };
-                }
-                AppKeyCode::Up => {
-                    editor.pan_by(canvas, 0, -1);
-                    return EditorKeyDispatch {
-                        handled: true,
-                        effects: Vec::new(),
-                    };
-                }
-                AppKeyCode::Down => {
-                    editor.pan_by(canvas, 0, 1);
-                    return EditorKeyDispatch {
-                        handled: true,
-                        effects: Vec::new(),
-                    };
-                }
-                _ => {}
-            }
-        }
-
-        match key.code {
-            AppKeyCode::Backspace | AppKeyCode::Char('h') => push_left(editor, canvas),
-            AppKeyCode::Char('j') => push_down(editor, canvas),
-            AppKeyCode::Char('k') => push_up(editor, canvas),
-            AppKeyCode::Char('l') => push_right(editor, canvas),
-            AppKeyCode::Char('y') => pull_from_left(editor, canvas),
-            AppKeyCode::Char('u') => pull_from_down(editor, canvas),
-            AppKeyCode::Tab | AppKeyCode::Char('i') => pull_from_up(editor, canvas),
-            AppKeyCode::Char('o') => pull_from_right(editor, canvas),
-            AppKeyCode::Char('c') => {
-                let _ = copy_selection_or_cell(editor, canvas);
-            }
-            AppKeyCode::Char('x') => {
-                let _ = cut_selection_or_cell(editor, canvas, color);
-            }
-            AppKeyCode::Char('v') => {
-                let _ = paste_primary_swatch(editor, canvas, color);
-            }
-            AppKeyCode::Char('b') => {
-                let _ = draw_selection_border(editor, canvas, color);
-            }
-            AppKeyCode::Char('t') => {
-                return EditorKeyDispatch {
-                    handled: transpose_selection_corner(editor),
-                    effects: Vec::new(),
-                };
-            }
-            AppKeyCode::Char(' ') => smart_fill(editor, canvas, color),
-            AppKeyCode::Char(ch) if swatch_home_row_index(ch).is_some() => {
-                editor.activate_swatch(swatch_home_row_index(ch).unwrap());
-            }
-            _ => return EditorKeyDispatch::default(),
-        }
-
-        return EditorKeyDispatch {
-            handled: true,
-            effects: Vec::new(),
+        return match key.code {
+            AppKeyCode::Backspace | AppKeyCode::Char('h') => Some(EditorAction::PushLeft),
+            AppKeyCode::Char('j') => Some(EditorAction::PushDown),
+            AppKeyCode::Char('k') => Some(EditorAction::PushUp),
+            AppKeyCode::Char('l') => Some(EditorAction::PushRight),
+            AppKeyCode::Char('y') => Some(EditorAction::PullFromLeft),
+            AppKeyCode::Char('u') => Some(EditorAction::PullFromDown),
+            AppKeyCode::Tab | AppKeyCode::Char('i') => Some(EditorAction::PullFromUp),
+            AppKeyCode::Char('o') => Some(EditorAction::PullFromRight),
+            AppKeyCode::Char('c') => Some(EditorAction::CopySelection),
+            AppKeyCode::Char('x') => Some(EditorAction::CutSelection),
+            AppKeyCode::Char('v') => Some(EditorAction::PastePrimarySwatch),
+            AppKeyCode::Char('b') => Some(EditorAction::DrawBorder),
+            AppKeyCode::Char('t') => Some(EditorAction::TransposeSelectionCorner),
+            AppKeyCode::Char(' ') => Some(EditorAction::SmartFill),
+            AppKeyCode::Char(ch) => swatch_home_row_index(ch).map(EditorAction::ActivateSwatch),
+            _ => None,
         };
     }
 
     if key.modifiers.has_alt_like() {
-        match key.code {
-            AppKeyCode::Char('c') => {
-                return EditorKeyDispatch {
-                    handled: true,
-                    effects: vec![HostEffect::CopyToClipboard(export_system_clipboard_text(
-                        editor, canvas,
-                    ))],
-                };
-            }
-            AppKeyCode::Left => editor.pan_by(canvas, -1, 0),
-            AppKeyCode::Right => editor.pan_by(canvas, 1, 0),
-            AppKeyCode::Up => editor.pan_by(canvas, 0, -1),
-            AppKeyCode::Down => editor.pan_by(canvas, 0, 1),
-            _ => return EditorKeyDispatch::default(),
-        }
-
-        return EditorKeyDispatch {
-            handled: true,
-            effects: Vec::new(),
+        return match key.code {
+            AppKeyCode::Char('c') => Some(EditorAction::ExportSystemClipboard),
+            AppKeyCode::Left => Some(EditorAction::Pan { dx: -1, dy: 0 }),
+            AppKeyCode::Right => Some(EditorAction::Pan { dx: 1, dy: 0 }),
+            AppKeyCode::Up => Some(EditorAction::Pan { dx: 0, dy: -1 }),
+            AppKeyCode::Down => Some(EditorAction::Pan { dx: 0, dy: 1 }),
+            _ => None,
         };
     }
 
-    let is_move = matches!(
-        key.code,
-        AppKeyCode::Up
-            | AppKeyCode::Down
-            | AppKeyCode::Left
-            | AppKeyCode::Right
-            | AppKeyCode::Home
-            | AppKeyCode::End
-            | AppKeyCode::PageUp
-            | AppKeyCode::PageDown
-    );
-
-    if is_move && key.modifiers.shift {
-        editor.begin_selection();
-        let _ = move_for_key(editor, canvas, key.code);
-        return EditorKeyDispatch {
-            handled: true,
-            effects: Vec::new(),
-        };
-    }
-
-    if is_move && editor.mode.is_selecting() {
-        editor.clear_selection();
+    if let Some(dir) = move_dir_for_code(key.code) {
+        return Some(EditorAction::Move {
+            dir,
+            extend_selection: key.modifiers.shift,
+        });
     }
 
     match key.code {
-        AppKeyCode::Up
-        | AppKeyCode::Down
-        | AppKeyCode::Left
-        | AppKeyCode::Right
-        | AppKeyCode::Home
-        | AppKeyCode::End
-        | AppKeyCode::PageUp
-        | AppKeyCode::PageDown => {
-            let _ = move_for_key(editor, canvas, key.code);
+        AppKeyCode::Enter => Some(EditorAction::MoveDownLine),
+        AppKeyCode::Esc => Some(EditorAction::ClearSelection),
+        AppKeyCode::Char(ch) if mode.is_selecting() && has_selection_anchor => {
+            Some(EditorAction::FillSelectionOrCell(ch))
         }
-        AppKeyCode::Enter => editor.move_down(canvas),
-        AppKeyCode::Esc => editor.clear_selection(),
-        _ if editor.mode.is_selecting() && editor.selection_anchor.is_some() => match key.code {
-            AppKeyCode::Char(ch) => fill_selection_or_cell(editor, canvas, ch, color),
-            AppKeyCode::Backspace | AppKeyCode::Delete => {
-                fill_selection_or_cell(editor, canvas, ' ', color)
-            }
-            _ => return EditorKeyDispatch::default(),
-        },
-        _ => match key.code {
-            AppKeyCode::Char(ch) => {
-                let _ = insert_char(editor, canvas, ch, color);
-            }
-            AppKeyCode::Backspace => {
-                let _ = backspace(editor, canvas);
-            }
-            AppKeyCode::Delete => {
-                let _ = delete_at_cursor(editor, canvas);
-            }
-            _ => return EditorKeyDispatch::default(),
-        },
-    }
-
-    EditorKeyDispatch {
-        handled: true,
-        effects: Vec::new(),
+        AppKeyCode::Backspace | AppKeyCode::Delete
+            if mode.is_selecting() && has_selection_anchor =>
+        {
+            Some(EditorAction::FillSelectionOrCell(' '))
+        }
+        AppKeyCode::Char(ch) => Some(EditorAction::InsertChar(ch)),
+        AppKeyCode::Backspace => Some(EditorAction::Backspace),
+        AppKeyCode::Delete => Some(EditorAction::Delete),
+        _ => None,
     }
 }
 
@@ -1521,11 +1572,12 @@ mod tests {
         backspace, begin_paint_stroke, capture_bounds, capture_selection, copy_selection_or_cell,
         cut_selection_or_cell, delete_at_cursor, diff_canvas_op, dismiss_floating, draw_border,
         draw_selection_border, export_selection_as_text, export_system_clipboard_text,
-        fill_selection, fill_selection_or_cell, handle_editor_key_press, insert_char,
-        paint_floating_drag, paste_primary_swatch, paste_text_block, smart_fill, smart_fill_glyph,
-        stamp_clipboard, transpose_selection_corner, AppKey, AppKeyCode, AppModifiers, Bounds,
-        Clipboard, EditorKeyDispatch, EditorSession, FloatingSelection, HostEffect, Selection,
-        SelectionShape, SwatchActivation, Viewport,
+        fill_selection, fill_selection_or_cell, handle_editor_action, handle_editor_key_press,
+        insert_char, paint_floating_drag, paste_primary_swatch, paste_text_block, smart_fill,
+        smart_fill_glyph, stamp_clipboard, transpose_selection_corner, AppKey, AppKeyCode,
+        AppModifiers, Bounds, Clipboard, EditorAction, EditorKeyDispatch, EditorSession,
+        FloatingSelection, HostEffect, Mode, MoveDir, Selection, SelectionShape, SwatchActivation,
+        Viewport,
     };
     use dartboard_core::{Canvas, CanvasOp, CellValue, Pos, RgbColor};
 
@@ -2189,6 +2241,149 @@ mod tests {
         assert_eq!(
             editor.swatches[0].as_ref().unwrap().clipboard.get(0, 0),
             Some(CellValue::Narrow('x'))
+        );
+    }
+
+    #[test]
+    fn handle_editor_action_move_extends_selection_when_requested() {
+        let mut canvas = Canvas::with_size(6, 3);
+        let mut editor = EditorSession {
+            cursor: Pos { x: 1, y: 1 },
+            ..Default::default()
+        };
+
+        let dispatch = handle_editor_action(
+            &mut editor,
+            &mut canvas,
+            EditorAction::Move {
+                dir: MoveDir::Right,
+                extend_selection: true,
+            },
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert!(dispatch.handled);
+        assert!(dispatch.effects.is_empty());
+        assert!(editor.mode.is_selecting());
+        assert_eq!(editor.selection_anchor, Some(Pos { x: 1, y: 1 }));
+        assert_eq!(editor.cursor, Pos { x: 2, y: 1 });
+    }
+
+    #[test]
+    fn handle_editor_action_move_clears_selection_when_not_extending() {
+        let mut canvas = Canvas::with_size(6, 3);
+        let mut editor = EditorSession {
+            cursor: Pos { x: 2, y: 1 },
+            selection_anchor: Some(Pos { x: 1, y: 1 }),
+            mode: Mode::Select,
+            ..Default::default()
+        };
+
+        let dispatch = handle_editor_action(
+            &mut editor,
+            &mut canvas,
+            EditorAction::Move {
+                dir: MoveDir::Right,
+                extend_selection: false,
+            },
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert!(dispatch.handled);
+        assert!(editor.selection_anchor.is_none());
+        assert!(!editor.mode.is_selecting());
+        assert_eq!(editor.cursor, Pos { x: 3, y: 1 });
+    }
+
+    #[test]
+    fn handle_editor_action_export_system_clipboard_emits_effect() {
+        let mut canvas = Canvas::with_size(4, 2);
+        canvas.set(Pos { x: 0, y: 0 }, 'A');
+        let mut editor = EditorSession::default();
+
+        let dispatch = handle_editor_action(
+            &mut editor,
+            &mut canvas,
+            EditorAction::ExportSystemClipboard,
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(
+            dispatch,
+            EditorKeyDispatch {
+                handled: true,
+                effects: vec![HostEffect::CopyToClipboard("A   \n    ".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn handle_editor_action_insert_char_writes_cell() {
+        let mut canvas = Canvas::with_size(4, 2);
+        let mut editor = EditorSession {
+            cursor: Pos { x: 1, y: 0 },
+            ..Default::default()
+        };
+
+        let dispatch = handle_editor_action(
+            &mut editor,
+            &mut canvas,
+            EditorAction::InsertChar('Z'),
+            RgbColor::new(9, 9, 9),
+        );
+
+        assert!(dispatch.handled);
+        assert_eq!(
+            canvas.cell(Pos { x: 1, y: 0 }),
+            Some(CellValue::Narrow('Z'))
+        );
+    }
+
+    #[test]
+    fn handle_editor_action_transpose_reports_unhandled_without_anchor() {
+        let mut canvas = Canvas::with_size(4, 2);
+        let mut editor = EditorSession::default();
+
+        let dispatch = handle_editor_action(
+            &mut editor,
+            &mut canvas,
+            EditorAction::TransposeSelectionCorner,
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert!(!dispatch.handled);
+    }
+
+    #[test]
+    fn handle_editor_action_pan_shifts_viewport_origin() {
+        let mut canvas = Canvas::with_size(40, 20);
+        let mut editor = EditorSession::default();
+        editor.set_viewport(
+            Viewport {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 5,
+            },
+            &canvas,
+        );
+        editor.viewport_origin = Pos { x: 5, y: 5 };
+        let origin_before = editor.viewport_origin;
+
+        let dispatch = handle_editor_action(
+            &mut editor,
+            &mut canvas,
+            EditorAction::Pan { dx: 1, dy: -1 },
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert!(dispatch.handled);
+        assert_eq!(
+            editor.viewport_origin,
+            Pos {
+                x: origin_before.x + 1,
+                y: origin_before.y - 1,
+            }
         );
     }
 }
