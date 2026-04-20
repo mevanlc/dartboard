@@ -33,6 +33,10 @@ const PLAYER_PALETTE: [RgbColor; 8] = [
     RgbColor::new(255, 124, 196),
 ];
 
+/// Max concurrent players on a single shared canvas. Equal to the palette
+/// length so the seat cap preserves unique per-user colors.
+pub const MAX_PLAYERS: usize = PLAYER_PALETTE.len();
+
 fn resolve_user_color(requested: RgbColor, used: &[RgbColor]) -> RgbColor {
     if !used.contains(&requested) {
         return requested;
@@ -90,6 +94,13 @@ pub struct Hello {
     pub color: RgbColor,
 }
 
+/// Outcome of a connect attempt. Rejected connections leave no registered
+/// state on the server.
+pub enum ConnectOutcome {
+    Accepted(LocalClient),
+    Rejected(String),
+}
+
 impl ServerHandle {
     pub fn spawn_local<S: CanvasStore + 'static>(store: S) -> Self {
         let canvas = store.load().unwrap_or_default();
@@ -105,22 +116,44 @@ impl ServerHandle {
         Self { inner }
     }
 
-    pub fn connect_local(&self, hello: Hello) -> LocalClient {
+    pub fn try_connect_local(&self, hello: Hello) -> ConnectOutcome {
         let (tx, rx) = mpsc::channel();
-        let user_id = self.register(hello, EntrySender::Local(tx));
-        LocalClient {
-            server: self.clone(),
-            user_id,
-            rx,
-            next_client_op_id: 1,
+        match self.register(hello, EntrySender::Local(tx)) {
+            Ok(user_id) => ConnectOutcome::Accepted(LocalClient {
+                server: self.clone(),
+                user_id,
+                rx,
+                next_client_op_id: 1,
+            }),
+            Err(reason) => ConnectOutcome::Rejected(reason),
+        }
+    }
+
+    pub fn connect_local(&self, hello: Hello) -> LocalClient {
+        match self.try_connect_local(hello) {
+            ConnectOutcome::Accepted(client) => client,
+            ConnectOutcome::Rejected(reason) => {
+                panic!("connect_local rejected: {reason}")
+            }
         }
     }
 
     /// Register a new client with an already-constructed sender. Used by the
     /// WS listener to hand a tokio mpsc sender in; [`connect_local`] is a thin
     /// wrapper for the std-mpsc case.
-    pub(crate) fn register(&self, hello: Hello, sender: EntrySender) -> UserId {
+    pub(crate) fn register(&self, hello: Hello, sender: EntrySender) -> Result<UserId, String> {
         let mut state = self.inner.state.lock().unwrap();
+        if state.clients.len() >= MAX_PLAYERS {
+            let reason = format!(
+                "dartboard is full ({} / {} players)",
+                state.clients.len(),
+                MAX_PLAYERS
+            );
+            let _ = sender.send(ServerMsg::ConnectRejected {
+                reason: reason.clone(),
+            });
+            return Err(reason);
+        }
         let user_id = state.next_user_id;
         state.next_user_id += 1;
 
@@ -147,7 +180,7 @@ impl ServerHandle {
         }
 
         state.clients.push(ClientEntry { peer, sender });
-        user_id
+        Ok(user_id)
     }
 
     pub fn peer_count(&self) -> usize {
@@ -454,7 +487,11 @@ mod tests {
             Some(ServerMsg::Welcome { your_color, .. }) => your_color,
             other => panic!("expected Welcome, got {:?}", other),
         };
-        assert_ne!(bob_color, red(), "bob should not have kept the colliding color");
+        assert_ne!(
+            bob_color,
+            red(),
+            "bob should not have kept the colliding color"
+        );
         assert!(
             PLAYER_PALETTE.contains(&bob_color),
             "remapped color {:?} should come from the palette",
@@ -488,5 +525,28 @@ mod tests {
         );
         assert_eq!(server.peer_count(), 1);
         let _ = alice_id;
+    }
+
+    #[test]
+    fn next_connect_is_rejected_when_server_is_full() {
+        let server = ServerHandle::spawn_local(InMemStore);
+        let mut clients = Vec::new();
+        for i in 0..MAX_PLAYERS {
+            clients.push(server.connect_local(Hello {
+                name: format!("peer{i}"),
+                color: PLAYER_PALETTE[i],
+            }));
+        }
+
+        match server.try_connect_local(Hello {
+            name: "overflow".into(),
+            color: red(),
+        }) {
+            ConnectOutcome::Rejected(reason) => {
+                assert!(reason.to_lowercase().contains("full"), "reason: {reason}");
+            }
+            ConnectOutcome::Accepted(_) => panic!("server should be full"),
+        }
+        assert_eq!(server.peer_count(), MAX_PLAYERS);
     }
 }

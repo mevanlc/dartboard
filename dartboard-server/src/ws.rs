@@ -28,8 +28,6 @@ pub(crate) async fn accept_and_run(
     };
 
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMsg>();
-    let user_id = server.register(hello, EntrySender::Ws(outbound_tx));
-
     let writer = tokio::spawn(async move {
         while let Some(msg) = outbound_rx.recv().await {
             let Ok(text) = serde_json::to_string(&msg) else {
@@ -40,6 +38,13 @@ pub(crate) async fn accept_and_run(
             }
         }
     });
+    let user_id = match server.register(hello, EntrySender::Ws(outbound_tx)) {
+        Ok(user_id) => user_id,
+        Err(_) => {
+            let _ = writer.await;
+            return Ok(());
+        }
+    };
 
     while let Some(frame) = read.next().await {
         let Ok(Message::Text(text)) = frame else {

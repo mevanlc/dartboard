@@ -35,6 +35,9 @@ pub enum ServerMsg {
         peers: Vec<Peer>,
         snapshot: Canvas,
     },
+    ConnectRejected {
+        reason: String,
+    },
     Ack {
         client_op_id: ClientOpId,
         seq: Seq,

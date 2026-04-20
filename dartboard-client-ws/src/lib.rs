@@ -34,6 +34,7 @@ pub enum ConnectError {
     Io(std::io::Error),
     // Boxed to keep ConnectError small; the underlying type is ~130 bytes.
     Ws(Box<tokio_tungstenite::tungstenite::Error>),
+    Rejected(String),
 }
 
 impl std::fmt::Display for ConnectError {
@@ -41,6 +42,7 @@ impl std::fmt::Display for ConnectError {
         match self {
             Self::Io(e) => write!(f, "io error: {}", e),
             Self::Ws(e) => write!(f, "ws error: {}", e),
+            Self::Rejected(reason) => write!(f, "{}", reason),
         }
     }
 }
@@ -121,6 +123,46 @@ async fn run_connection(
         color: hello.color,
     })?;
     write.send(Message::Text(hello_text)).await?;
+
+    // Wait for the handshake response so a full server fails fast instead of
+    // constructing a client that times out waiting for Welcome.
+    let first_msg = match read.next().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMsg>(&text) {
+            Ok(msg) => msg,
+            Err(e) => {
+                let _ = ready_tx.send(Err(ConnectError::Io(std::io::Error::other(format!(
+                    "invalid server handshake: {e}"
+                )))));
+                return Ok(());
+            }
+        },
+        Some(Ok(other)) => {
+            let _ = ready_tx.send(Err(ConnectError::Io(std::io::Error::other(format!(
+                "expected server handshake text frame, got {other:?}"
+            )))));
+            return Ok(());
+        }
+        Some(Err(e)) => {
+            let _ = ready_tx.send(Err(ConnectError::Ws(Box::new(e))));
+            return Ok(());
+        }
+        None => {
+            let _ = ready_tx.send(Err(ConnectError::Io(std::io::Error::other(
+                "server closed before handshake completed",
+            ))));
+            return Ok(());
+        }
+    };
+    if let ServerMsg::ConnectRejected { reason } = first_msg {
+        let _ = ready_tx.send(Err(ConnectError::Rejected(reason)));
+        return Ok(());
+    }
+    if inbound_tx.send(first_msg).is_err() {
+        let _ = ready_tx.send(Err(ConnectError::Io(std::io::Error::other(
+            "client dropped before handshake completed",
+        ))));
+        return Ok(());
+    }
     let _ = ready_tx.send(Ok(()));
 
     let writer = tokio::spawn(async move {
