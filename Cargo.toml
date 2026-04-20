@@ -6,7 +6,7 @@ members = [
     "dartboard-server",
     "dartboard-client-ws",
     "dartboard-tui",
-    "dartboard",
+    "dartboard-cli",
 ]
 
 [workspace.package]

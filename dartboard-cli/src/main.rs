@@ -9,7 +9,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use dartboard::{app::App, theme, ui};
+use dartboard_cli::{app::App, theme, ui};
 use dartboard_client_ws::{Hello, WebsocketClient};
 use dartboard_core::RgbColor;
 use dartboard_server::{InMemStore, ServerHandle};
