@@ -1,9 +1,11 @@
 pub mod app;
 mod emoji;
+pub mod input;
 pub mod theme;
 pub mod ui;
 
-pub use app::{
-    App, AppIntent, AppKey, AppKeyCode, AppModifiers, AppPointerButton, AppPointerEvent,
-    AppPointerKind, HostEffect,
+pub use app::{App, HostEffect};
+pub use input::{
+    app_intent_from_crossterm, app_key_from_crossterm, app_pointer_event_from_crossterm, AppIntent,
+    AppKey, AppKeyCode, AppModifiers, AppPointerButton, AppPointerEvent, AppPointerKind,
 };

@@ -1,8 +1,8 @@
 use std::io;
 
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::Event;
+#[cfg(test)]
+use crossterm::event::KeyEvent;
 use crossterm::{clipboard::CopyToClipboard, execute};
 use ratatui::layout::Rect;
 
@@ -14,6 +14,12 @@ use dartboard_core::{
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
 use crate::emoji;
+use crate::input::app_intent_from_crossterm;
+#[cfg(test)]
+use crate::input::app_key_from_crossterm;
+pub use crate::input::{
+    AppIntent, AppKey, AppKeyCode, AppModifiers, AppPointerButton, AppPointerEvent, AppPointerKind,
+};
 use crate::theme;
 
 const UNDO_DEPTH_CAP: usize = 500;
@@ -51,162 +57,6 @@ impl Client for ClientBox {
         match self {
             Self::Local(c) => c.try_recv(),
             Self::Ws(c) => c.try_recv(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AppModifiers {
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
-    pub meta: bool,
-}
-
-impl AppModifiers {
-    fn from_crossterm(modifiers: KeyModifiers) -> Self {
-        Self {
-            ctrl: modifiers.contains(KeyModifiers::CONTROL),
-            alt: modifiers.contains(KeyModifiers::ALT),
-            shift: modifiers.contains(KeyModifiers::SHIFT),
-            meta: modifiers.contains(KeyModifiers::META),
-        }
-    }
-
-    fn has_alt_like(self) -> bool {
-        self.alt || self.meta
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppKeyCode {
-    Backspace,
-    Enter,
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Tab,
-    BackTab,
-    Delete,
-    Esc,
-    F(u8),
-    Char(char),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppKey {
-    pub code: AppKeyCode,
-    pub modifiers: AppModifiers,
-}
-
-impl AppKey {
-    fn from_crossterm(key: KeyEvent) -> Option<Self> {
-        if key.kind != KeyEventKind::Press {
-            return None;
-        }
-
-        let code = match key.code {
-            KeyCode::Backspace => AppKeyCode::Backspace,
-            KeyCode::Enter => AppKeyCode::Enter,
-            KeyCode::Left => AppKeyCode::Left,
-            KeyCode::Right => AppKeyCode::Right,
-            KeyCode::Up => AppKeyCode::Up,
-            KeyCode::Down => AppKeyCode::Down,
-            KeyCode::Home => AppKeyCode::Home,
-            KeyCode::End => AppKeyCode::End,
-            KeyCode::PageUp => AppKeyCode::PageUp,
-            KeyCode::PageDown => AppKeyCode::PageDown,
-            KeyCode::Tab => AppKeyCode::Tab,
-            KeyCode::BackTab => AppKeyCode::BackTab,
-            KeyCode::Delete => AppKeyCode::Delete,
-            KeyCode::Esc => AppKeyCode::Esc,
-            KeyCode::F(n) => AppKeyCode::F(n),
-            KeyCode::Char(ch) => AppKeyCode::Char(ch),
-            _ => return None,
-        };
-
-        Some(Self {
-            code,
-            modifiers: AppModifiers::from_crossterm(key.modifiers),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppPointerButton {
-    Left,
-    Right,
-    Middle,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppPointerKind {
-    Down(AppPointerButton),
-    Up(AppPointerButton),
-    Drag(AppPointerButton),
-    Moved,
-    ScrollUp,
-    ScrollDown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppPointerEvent {
-    pub column: u16,
-    pub row: u16,
-    pub kind: AppPointerKind,
-    pub modifiers: AppModifiers,
-}
-
-impl AppPointerEvent {
-    fn from_crossterm(mouse: MouseEvent) -> Option<Self> {
-        let kind = match mouse.kind {
-            MouseEventKind::Down(button) => AppPointerKind::Down(AppPointerButton::from(button)?),
-            MouseEventKind::Up(button) => AppPointerKind::Up(AppPointerButton::from(button)?),
-            MouseEventKind::Drag(button) => AppPointerKind::Drag(AppPointerButton::from(button)?),
-            MouseEventKind::Moved => AppPointerKind::Moved,
-            MouseEventKind::ScrollUp => AppPointerKind::ScrollUp,
-            MouseEventKind::ScrollDown => AppPointerKind::ScrollDown,
-            _ => return None,
-        };
-
-        Some(Self {
-            column: mouse.column,
-            row: mouse.row,
-            kind,
-            modifiers: AppModifiers::from_crossterm(mouse.modifiers),
-        })
-    }
-}
-
-impl AppPointerButton {
-    fn from(button: MouseButton) -> Option<Self> {
-        match button {
-            MouseButton::Left => Some(Self::Left),
-            MouseButton::Right => Some(Self::Right),
-            MouseButton::Middle => Some(Self::Middle),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppIntent {
-    KeyPress(AppKey),
-    Pointer(AppPointerEvent),
-    Paste(String),
-}
-
-impl AppIntent {
-    fn from_crossterm(event: Event) -> Option<Self> {
-        match event {
-            Event::Key(key) => AppKey::from_crossterm(key).map(Self::KeyPress),
-            Event::Mouse(mouse) => AppPointerEvent::from_crossterm(mouse).map(Self::Pointer),
-            Event::Paste(data) => Some(Self::Paste(data)),
-            _ => None,
         }
     }
 }
@@ -2243,7 +2093,7 @@ impl App {
     }
 
     pub fn handle_event(&mut self, event: Event) {
-        if let Some(intent) = AppIntent::from_crossterm(event) {
+        if let Some(intent) = app_intent_from_crossterm(event) {
             let effects = self.handle_intent(intent);
             self.apply_host_effects(effects);
         } else {
@@ -2565,7 +2415,7 @@ impl App {
 
     #[cfg(test)]
     fn handle_key(&mut self, key: KeyEvent) {
-        let Some(key) = AppKey::from_crossterm(key) else {
+        let Some(key) = app_key_from_crossterm(key) else {
             return;
         };
         let _ = self.handle_key_press(key);
