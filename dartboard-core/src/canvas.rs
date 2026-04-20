@@ -11,8 +11,8 @@ pub struct Pos {
     pub y: usize,
 }
 
-pub const DEFAULT_WIDTH: usize = 352;
-pub const DEFAULT_HEIGHT: usize = 96;
+pub const DEFAULT_WIDTH: usize = 256;
+pub const DEFAULT_HEIGHT: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CellValue {
@@ -385,7 +385,7 @@ impl Canvas {
 
 #[cfg(test)]
 mod tests {
-    use super::{Canvas, CellValue, Pos};
+    use super::{Canvas, CellValue, Pos, DEFAULT_HEIGHT, DEFAULT_WIDTH};
     use crate::color::RgbColor;
 
     #[test]
@@ -482,5 +482,12 @@ mod tests {
         let j = serde_json::to_string(&canvas).unwrap();
         let back: Canvas = serde_json::from_str(&j).unwrap();
         assert_eq!(canvas, back);
+    }
+
+    #[test]
+    fn default_canvas_uses_expected_dimensions() {
+        let canvas = Canvas::new();
+        assert_eq!(canvas.width, DEFAULT_WIDTH);
+        assert_eq!(canvas.height, DEFAULT_HEIGHT);
     }
 }

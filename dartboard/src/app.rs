@@ -2467,7 +2467,7 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
+    use dartboard_core::{Canvas, CellValue, Pos, RgbColor, DEFAULT_HEIGHT, DEFAULT_WIDTH};
     use ratatui::layout::Rect;
 
     fn setup_floating_wide_brush() -> App {
@@ -2954,7 +2954,7 @@ mod tests {
         while alice.try_recv().is_some() {}
         while bob.try_recv().is_some() {}
 
-        let empty = Canvas::with_size(352, 96);
+        let empty = Canvas::with_size(DEFAULT_WIDTH, DEFAULT_HEIGHT);
 
         let mut a_mirror = empty.clone();
         a_mirror.set_colored(Pos { x: 0, y: 0 }, 'X', RgbColor::new(255, 0, 0));
