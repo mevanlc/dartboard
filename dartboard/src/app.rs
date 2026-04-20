@@ -8,12 +8,27 @@ use ratatui::layout::Rect;
 
 use dartboard_client_ws::WebsocketClient;
 use dartboard_core::{
-    Canvas, CanvasOp, CellValue, Client, ClientOpId, Peer, Pos, RgbColor, ServerMsg, UserId,
+    Canvas, CanvasOp, Client, ClientOpId, Peer, Pos, RgbColor, ServerMsg, UserId,
 };
-use dartboard_editor::{diff_canvas_op as editor_diff_canvas_op, Bounds};
+#[cfg(test)]
+use dartboard_editor::{
+    backspace as editor_backspace, copy_selection_or_cell as editor_copy_selection_or_cell,
+    cut_selection_or_cell as editor_cut_selection_or_cell,
+    draw_selection_border as editor_draw_selection_border,
+    export_system_clipboard_text as editor_export_system_clipboard_text,
+    fill_selection_or_cell as editor_fill_selection_or_cell,
+    paste_primary_swatch as editor_paste_primary_swatch, smart_fill as editor_smart_fill,
+};
+use dartboard_editor::{
+    begin_paint_stroke as editor_begin_paint_stroke, diff_canvas_op as editor_diff_canvas_op,
+    dismiss_floating as editor_dismiss_floating, end_paint_stroke as editor_end_paint_stroke,
+    handle_editor_key_press as editor_handle_key_press, insert_char as editor_insert_char,
+    paint_floating_drag as editor_paint_floating_drag, paste_text_block as editor_paste_text_block,
+    stamp_floating as editor_stamp_floating,
+};
 pub use dartboard_editor::{
     Clipboard, EditorSession, FloatingSelection, HostEffect, Mode, PanDrag, Selection,
-    SelectionShape, Swatch, SWATCH_CAPACITY, Viewport,
+    SelectionShape, Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
@@ -161,6 +176,75 @@ impl App {
         Rect::new(viewport.x, viewport.y, viewport.width, viewport.height)
     }
 
+    fn editor_session_snapshot(&self) -> EditorSession {
+        EditorSession {
+            cursor: self.cursor,
+            mode: self.mode,
+            viewport: Self::viewport_to_editor(self.viewport),
+            viewport_origin: self.viewport_origin,
+            selection_anchor: self.selection_anchor,
+            selection_shape: self.selection_shape,
+            drag_origin: self.drag_origin,
+            pan_drag: self.pan_drag,
+            swatches: self.swatches.clone(),
+            floating: self.floating.clone(),
+            paint_stroke_anchor: self.paint_stroke_anchor,
+            paint_stroke_last: self.paint_stroke_last,
+        }
+    }
+
+    fn load_editor_session(&mut self, editor: EditorSession) {
+        self.cursor = editor.cursor;
+        self.mode = editor.mode;
+        self.viewport = Self::viewport_from_editor(editor.viewport);
+        self.viewport_origin = editor.viewport_origin;
+        self.selection_anchor = editor.selection_anchor;
+        self.selection_shape = editor.selection_shape;
+        self.drag_origin = editor.drag_origin;
+        self.pan_drag = editor.pan_drag;
+        self.swatches = editor.swatches;
+        self.floating = editor.floating;
+        self.paint_stroke_anchor = editor.paint_stroke_anchor;
+        self.paint_stroke_last = editor.paint_stroke_last;
+    }
+
+    fn take_editor_session(&mut self) -> EditorSession {
+        EditorSession {
+            cursor: self.cursor,
+            mode: self.mode,
+            viewport: Self::viewport_to_editor(self.viewport),
+            viewport_origin: self.viewport_origin,
+            selection_anchor: self.selection_anchor,
+            selection_shape: self.selection_shape,
+            drag_origin: self.drag_origin,
+            pan_drag: self.pan_drag,
+            swatches: std::mem::take(&mut self.swatches),
+            floating: self.floating.take(),
+            paint_stroke_anchor: self.paint_stroke_anchor,
+            paint_stroke_last: self.paint_stroke_last,
+        }
+    }
+
+    fn with_editor_session_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut EditorSession, &Canvas) -> R,
+    ) -> R {
+        let mut editor = self.take_editor_session();
+        let result = f(&mut editor, &self.canvas);
+        self.load_editor_session(editor);
+        result
+    }
+
+    fn with_editor_and_canvas_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut EditorSession, &mut Canvas) -> R,
+    ) -> R {
+        let mut editor = self.take_editor_session();
+        let result = f(&mut editor, &mut self.canvas);
+        self.load_editor_session(editor);
+        result
+    }
+
     pub fn new() -> Self {
         let default_session = UserSession::default();
         let users: Vec<LocalUser> = theme::PLAYER_PALETTE
@@ -289,20 +373,7 @@ impl App {
 
     fn current_session(&self) -> UserSession {
         UserSession {
-            editor: EditorSession {
-                cursor: self.cursor,
-                mode: self.mode,
-                viewport: Self::viewport_to_editor(self.viewport),
-                viewport_origin: self.viewport_origin,
-                selection_anchor: self.selection_anchor,
-                selection_shape: self.selection_shape,
-                drag_origin: self.drag_origin,
-                pan_drag: self.pan_drag,
-                swatches: self.swatches.clone(),
-                floating: self.floating.clone(),
-                paint_stroke_anchor: self.paint_stroke_anchor,
-                paint_stroke_last: self.paint_stroke_last,
-            },
+            editor: self.editor_session_snapshot(),
             show_help: self.show_help,
             help_tab: self.help_tab,
             emoji_picker_open: self.emoji_picker_open,
@@ -312,23 +383,12 @@ impl App {
     }
 
     fn load_session(&mut self, session: UserSession) {
-        self.cursor = session.editor.cursor;
-        self.mode = session.editor.mode;
+        self.load_editor_session(session.editor);
         self.show_help = session.show_help;
         self.help_tab = session.help_tab;
         self.emoji_picker_open = session.emoji_picker_open;
-        self.viewport = Self::viewport_from_editor(session.editor.viewport);
-        self.viewport_origin = session.editor.viewport_origin;
-        self.selection_anchor = session.editor.selection_anchor;
-        self.selection_shape = session.editor.selection_shape;
-        self.drag_origin = session.editor.drag_origin;
-        self.pan_drag = session.editor.pan_drag;
-        self.swatches = session.editor.swatches;
-        self.floating = session.editor.floating;
         self.emoji_picker_state = session.emoji_picker_state;
         self.paint_canvas_before = session.paint_canvas_before;
-        self.paint_stroke_anchor = session.editor.paint_stroke_anchor;
-        self.paint_stroke_last = session.editor.paint_stroke_last;
         self.swatch_body_hits = [None; SWATCH_CAPACITY];
         self.swatch_pin_hits = [None; SWATCH_CAPACITY];
     }
@@ -396,9 +456,14 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     fn apply_canvas_edit(&mut self, edit: impl FnOnce(&mut Canvas)) {
         let before = self.canvas.clone();
         edit(&mut self.canvas);
+        self.finish_canvas_edit(before);
+    }
+
+    fn finish_canvas_edit(&mut self, before: Canvas) {
         if self.canvas != before {
             let op = diff_canvas_op(&before, &self.canvas);
             self.undo_stack.push(before);
@@ -545,88 +610,20 @@ impl App {
         }
     }
 
-    fn visible_bounds(&self) -> Bounds {
-        if self.viewport.width == 0 || self.viewport.height == 0 {
-            return Bounds {
-                min_x: 0,
-                max_x: self.canvas.width.saturating_sub(1),
-                min_y: 0,
-                max_y: self.canvas.height.saturating_sub(1),
-            };
-        }
-
-        let min_x = self
-            .viewport_origin
-            .x
-            .min(self.canvas.width.saturating_sub(1));
-        let min_y = self
-            .viewport_origin
-            .y
-            .min(self.canvas.height.saturating_sub(1));
-        let max_x = (self.viewport_origin.x + self.viewport.width.saturating_sub(1) as usize)
-            .min(self.canvas.width.saturating_sub(1));
-        let max_y = (self.viewport_origin.y + self.viewport.height.saturating_sub(1) as usize)
-            .min(self.canvas.height.saturating_sub(1));
-
-        Bounds {
-            min_x,
-            max_x,
-            min_y,
-            max_y,
-        }
-    }
-
-    fn clamp_cursor_to_visible_bounds(&mut self) {
-        let bounds = self.visible_bounds();
-        self.cursor.x = self.cursor.x.clamp(bounds.min_x, bounds.max_x);
-        self.cursor.y = self.cursor.y.clamp(bounds.min_y, bounds.max_y);
-    }
-
     fn move_left(&mut self) {
-        if self.cursor.x == 0 {
-            return;
-        }
-        self.cursor.x -= 1;
-        self.scroll_viewport_to_cursor();
+        self.with_editor_session_mut(|editor, canvas| editor.move_left(canvas));
     }
 
     fn move_right(&mut self) {
-        if self.cursor.x + 1 >= self.canvas.width {
-            return;
-        }
-        self.cursor.x += 1;
-        self.scroll_viewport_to_cursor();
+        self.with_editor_session_mut(|editor, canvas| editor.move_right(canvas));
     }
 
     fn move_up(&mut self) {
-        if self.cursor.y == 0 {
-            return;
-        }
-        self.cursor.y -= 1;
-        self.scroll_viewport_to_cursor();
+        self.with_editor_session_mut(|editor, canvas| editor.move_up(canvas));
     }
 
     fn move_down(&mut self) {
-        if self.cursor.y + 1 >= self.canvas.height {
-            return;
-        }
-        self.cursor.y += 1;
-        self.scroll_viewport_to_cursor();
-    }
-
-    fn scroll_viewport_to_cursor(&mut self) {
-        let bounds = self.visible_bounds();
-        if self.cursor.x < bounds.min_x {
-            self.viewport_origin.x -= bounds.min_x - self.cursor.x;
-        } else if self.cursor.x > bounds.max_x {
-            self.viewport_origin.x += self.cursor.x - bounds.max_x;
-        }
-        if self.cursor.y < bounds.min_y {
-            self.viewport_origin.y -= bounds.min_y - self.cursor.y;
-        } else if self.cursor.y > bounds.max_y {
-            self.viewport_origin.y += self.cursor.y - bounds.max_y;
-        }
-        self.clamp_viewport_origin();
+        self.with_editor_session_mut(|editor, canvas| editor.move_down(canvas));
     }
 
     fn mouse_to_canvas(&self, col: u16, row: u16) -> Option<Pos> {
@@ -684,355 +681,61 @@ impl App {
         col >= vx && row >= vy && col < vx + vw && row < vy + vh
     }
 
-    fn clamp_viewport_origin(&mut self) {
-        let max_x = self
-            .canvas
-            .width
-            .saturating_sub(self.viewport.width.max(1) as usize);
-        let max_y = self
-            .canvas
-            .height
-            .saturating_sub(self.viewport.height.max(1) as usize);
-        self.viewport_origin.x = self.viewport_origin.x.min(max_x);
-        self.viewport_origin.y = self.viewport_origin.y.min(max_y);
-    }
-
     pub fn set_viewport(&mut self, viewport: Rect) {
-        self.viewport = viewport;
-        self.clamp_viewport_origin();
-        self.clamp_cursor_to_visible_bounds();
+        let viewport = Self::viewport_to_editor(viewport);
+        self.with_editor_session_mut(|editor, canvas| editor.set_viewport(viewport, canvas));
     }
 
+    #[cfg(test)]
     fn pan_by(&mut self, dx: isize, dy: isize) {
-        let next_x = self.viewport_origin.x.saturating_add_signed(dx);
-        let next_y = self.viewport_origin.y.saturating_add_signed(dy);
-        self.viewport_origin.x = next_x;
-        self.viewport_origin.y = next_y;
-        self.clamp_viewport_origin();
-        self.clamp_cursor_to_visible_bounds();
+        self.with_editor_session_mut(|editor, canvas| editor.pan_by(canvas, dx, dy));
     }
 
     fn begin_pan(&mut self, col: u16, row: u16) {
-        self.pan_drag = Some(PanDrag {
-            col,
-            row,
-            origin: self.viewport_origin,
-        });
+        self.with_editor_session_mut(|editor, _| editor.begin_pan(col, row));
     }
 
     fn drag_pan(&mut self, col: u16, row: u16) {
-        let Some(pan_drag) = self.pan_drag else {
-            return;
-        };
-        let dx = pan_drag.col as i32 - col as i32;
-        let dy = pan_drag.row as i32 - row as i32;
-        self.viewport_origin.x = pan_drag.origin.x.saturating_add_signed(dx as isize);
-        self.viewport_origin.y = pan_drag.origin.y.saturating_add_signed(dy as isize);
-        self.clamp_viewport_origin();
-        self.clamp_cursor_to_visible_bounds();
+        self.with_editor_session_mut(|editor, canvas| editor.drag_pan(canvas, col, row));
     }
 
     fn end_pan(&mut self) {
-        self.pan_drag = None;
+        self.with_editor_session_mut(|editor, _| editor.end_pan());
     }
 
     fn clamp_cursor(&mut self) {
-        self.cursor.x = self.cursor.x.min(self.canvas.width.saturating_sub(1));
-        self.cursor.y = self.cursor.y.min(self.canvas.height.saturating_sub(1));
-        self.clamp_cursor_to_visible_bounds();
-    }
-
-    fn begin_selection_with_shape(&mut self, shape: SelectionShape) {
-        if self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
-        }
-        self.selection_shape = shape;
-        self.mode = Mode::Select;
-    }
-
-    fn begin_selection(&mut self) {
-        self.begin_selection_with_shape(SelectionShape::Rect);
+        self.with_editor_session_mut(|editor, canvas| editor.clamp_cursor(canvas));
     }
 
     fn clear_selection(&mut self) {
-        self.selection_anchor = None;
-        self.selection_shape = SelectionShape::Rect;
-        self.mode = Mode::Draw;
+        self.with_editor_session_mut(|editor, _| editor.clear_selection());
     }
 
     pub fn selection(&self) -> Option<Selection> {
-        self.selection_anchor.map(|anchor| Selection {
-            anchor,
-            cursor: self.cursor,
-            shape: self.selection_shape,
-        })
+        self.editor_session_snapshot().selection()
     }
 
-    fn selection_bounds(&self) -> Option<Bounds> {
-        self.selection().map(Selection::bounds)
-    }
-
-    fn selection_or_cursor_bounds(&self) -> Bounds {
-        self.selection_bounds()
-            .unwrap_or_else(|| Bounds::single(self.cursor))
-    }
-
-    fn full_canvas_bounds(&self) -> Bounds {
-        Bounds {
-            min_x: 0,
-            max_x: self.canvas.width.saturating_sub(1),
-            min_y: 0,
-            max_y: self.canvas.height.saturating_sub(1),
-        }
-    }
-
-    fn system_clipboard_bounds(&self) -> Bounds {
-        self.selection_bounds()
-            .unwrap_or_else(|| self.full_canvas_bounds())
-            .normalized_for_canvas(&self.canvas)
-    }
-
-    fn fill_bounds_on(canvas: &mut Canvas, bounds: Bounds, ch: char, fg: RgbColor) {
-        for y in bounds.min_y..=bounds.max_y {
-            let mut x = bounds.min_x;
-            while x <= bounds.max_x {
-                if ch == ' ' {
-                    canvas.clear(Pos { x, y });
-                    x += 1;
-                    continue;
-                }
-
-                let width = Canvas::display_width(ch);
-                if width == 2 && x == bounds.max_x {
-                    break;
-                }
-                let _ = canvas.put_glyph_colored(Pos { x, y }, ch, fg);
-                x += width;
-            }
-        }
-    }
-
-    fn fill_selection_on(
-        canvas: &mut Canvas,
-        selection: Selection,
-        bounds: Bounds,
-        ch: char,
-        fg: RgbColor,
-    ) {
-        if selection.shape == SelectionShape::Rect {
-            Self::fill_bounds_on(canvas, bounds, ch, fg);
-            return;
-        }
-
-        let glyph_width = Canvas::display_width(ch);
-        for y in bounds.min_y..=bounds.max_y {
-            let mut x = bounds.min_x;
-            while x <= bounds.max_x {
-                let pos = Pos { x, y };
-                if !selection.contains(pos) {
-                    x += 1;
-                    continue;
-                }
-
-                if ch == ' ' {
-                    canvas.clear(pos);
-                    x += 1;
-                    continue;
-                }
-
-                if glyph_width == 1 {
-                    canvas.set_colored(pos, ch, fg);
-                    x += 1;
-                    continue;
-                }
-
-                if x < bounds.max_x && selection.contains(Pos { x: x + 1, y }) {
-                    let _ = canvas.put_glyph_colored(pos, ch, fg);
-                    x += glyph_width;
-                } else {
-                    x += 1;
-                }
-            }
-        }
-    }
-
-    fn selection_has_unselected_neighbor(selection: Selection, pos: Pos) -> bool {
-        let neighbors = [
-            pos.x.checked_sub(1).map(|x| Pos { x, y: pos.y }),
-            Some(Pos {
-                x: pos.x + 1,
-                y: pos.y,
-            }),
-            pos.y.checked_sub(1).map(|y| Pos { x: pos.x, y }),
-            Some(Pos {
-                x: pos.x,
-                y: pos.y + 1,
-            }),
-        ];
-        neighbors
-            .into_iter()
-            .flatten()
-            .any(|neighbor| !selection.contains(neighbor))
-    }
-
-    fn draw_selection_border_on(
-        canvas: &mut Canvas,
-        selection: Selection,
-        bounds: Bounds,
-        color: RgbColor,
-    ) {
-        if selection.shape == SelectionShape::Rect {
-            return;
-        }
-
-        for y in bounds.min_y..=bounds.max_y {
-            for x in bounds.min_x..=bounds.max_x {
-                let pos = Pos { x, y };
-                if selection.contains(pos)
-                    && Self::selection_has_unselected_neighbor(selection, pos)
-                {
-                    canvas.set_colored(pos, '*', color);
-                }
-            }
-        }
-    }
-
-    fn capture_bounds(&self, bounds: Bounds) -> Clipboard {
-        let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
-        for y in bounds.min_y..=bounds.max_y {
-            for x in bounds.min_x..=bounds.max_x {
-                cells.push(self.canvas.cell(Pos { x, y }));
-            }
-        }
-        Clipboard::new(bounds.width(), bounds.height(), cells)
-    }
-
-    fn capture_selection(&self, selection: Selection) -> Clipboard {
-        let bounds = selection.bounds().normalized_for_canvas(&self.canvas);
-        let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
-        for y in bounds.min_y..=bounds.max_y {
-            for x in bounds.min_x..=bounds.max_x {
-                let pos = Pos { x, y };
-                let include = selection.contains(pos)
-                    || self
-                        .canvas
-                        .glyph_origin(pos)
-                        .is_some_and(|origin| selection.contains(origin));
-                cells.push(include.then(|| self.canvas.cell(pos)).flatten());
-            }
-        }
-        Clipboard::new(bounds.width(), bounds.height(), cells)
-    }
-
+    #[cfg(test)]
     fn copy_selection_or_cell(&mut self) {
-        if self.floating.is_some() {
-            return;
-        }
-        let clipboard = match self.selection() {
-            Some(selection) => self.capture_selection(selection),
-            None => {
-                let bounds = self
-                    .selection_or_cursor_bounds()
-                    .normalized_for_canvas(&self.canvas);
-                self.capture_bounds(bounds)
-            }
-        };
-        self.push_swatch(clipboard);
-    }
-
-    fn export_bounds_as_text(&self, bounds: Bounds) -> String {
-        let mut text = String::with_capacity(bounds.width() * bounds.height() + bounds.height());
-        for y in bounds.min_y..=bounds.max_y {
-            for x in bounds.min_x..=bounds.max_x {
-                match self.canvas.cell(Pos { x, y }) {
-                    Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => text.push(ch),
-                    Some(CellValue::WideCont) => {}
-                    None => text.push(' '),
-                }
-            }
-            if y != bounds.max_y {
-                text.push('\n');
-            }
-        }
-        text
-    }
-
-    fn export_selection_as_text(&self, selection: Selection) -> String {
-        let bounds = selection.bounds().normalized_for_canvas(&self.canvas);
-        let mut text = String::with_capacity(bounds.width() * bounds.height() + bounds.height());
-        for y in bounds.min_y..=bounds.max_y {
-            for x in bounds.min_x..=bounds.max_x {
-                let pos = Pos { x, y };
-                if selection.contains(pos) {
-                    match self.canvas.cell(pos) {
-                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => text.push(ch),
-                        Some(CellValue::WideCont) => {}
-                        None => text.push(' '),
-                    }
-                } else {
-                    text.push(' ');
-                }
-            }
-            if y != bounds.max_y {
-                text.push('\n');
-            }
-        }
-        text
-    }
-
-    fn export_system_clipboard_text(&self) -> String {
-        match self.selection() {
-            Some(selection) => self.export_selection_as_text(selection),
-            None => self.export_bounds_as_text(self.system_clipboard_bounds()),
-        }
-    }
-
-    fn copy_to_system_clipboard_effect(&self) -> HostEffect {
-        HostEffect::CopyToClipboard(self.export_system_clipboard_text())
-    }
-
-    fn cut_selection_or_cell(&mut self) {
-        if self.floating.is_some() {
-            return;
-        }
-        let selection = self.selection();
-        let bounds = self
-            .selection_or_cursor_bounds()
-            .normalized_for_canvas(&self.canvas);
-        let clipboard = selection
-            .map(|selection| self.capture_selection(selection))
-            .unwrap_or_else(|| self.capture_bounds(bounds));
-        self.push_swatch(clipboard);
-        let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| match selection {
-            Some(selection) => Self::fill_selection_on(canvas, selection, bounds, ' ', color),
-            None => Self::fill_bounds_on(canvas, bounds, ' ', color),
+        self.with_editor_session_mut(|editor, canvas| {
+            let _ = editor_copy_selection_or_cell(editor, canvas);
         });
     }
 
-    fn push_swatch(&mut self, clipboard: Clipboard) {
-        let unpinned_slots: Vec<usize> = (0..SWATCH_CAPACITY)
-            .filter(|&i| !matches!(&self.swatches[i], Some(s) if s.pinned))
-            .collect();
-        if unpinned_slots.is_empty() {
-            return;
-        }
+    #[cfg(test)]
+    fn export_system_clipboard_text(&self) -> String {
+        editor_export_system_clipboard_text(&self.editor_session_snapshot(), &self.canvas)
+    }
 
-        let mut queue: Vec<Swatch> = unpinned_slots
-            .iter()
-            .filter_map(|&i| self.swatches[i].take())
-            .collect();
-        queue.insert(
-            0,
-            Swatch {
-                clipboard,
-                pinned: false,
-            },
-        );
-        queue.truncate(unpinned_slots.len());
-
-        for (slot_idx, swatch) in unpinned_slots.iter().zip(queue.into_iter()) {
-            self.swatches[*slot_idx] = Some(swatch);
+    #[cfg(test)]
+    fn cut_selection_or_cell(&mut self) {
+        let color = self.active_user_color();
+        let before = self.canvas.clone();
+        let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_cut_selection_or_cell(editor, canvas, color)
+        });
+        if changed {
+            self.finish_canvas_edit(before);
         }
     }
 
@@ -1042,112 +745,34 @@ impl App {
     }
 
     pub fn toggle_pin(&mut self, idx: usize) {
-        if idx >= SWATCH_CAPACITY {
-            return;
-        }
-        if let Some(swatch) = self.swatches[idx].as_mut() {
-            swatch.pinned = !swatch.pinned;
-        }
+        self.with_editor_session_mut(|editor, _| editor.toggle_pin(idx));
     }
 
     pub fn activate_swatch(&mut self, idx: usize) {
-        if idx >= SWATCH_CAPACITY {
-            return;
-        }
-        let Some(swatch) = self.swatches[idx].as_ref() else {
-            return;
-        };
-        match self.floating.as_mut() {
-            Some(floating) if floating.source_index == Some(idx) => {
-                floating.transparent = !floating.transparent;
-            }
-            _ => {
-                let clipboard = swatch.clipboard.clone();
-                self.end_paint_stroke();
-                self.floating = Some(FloatingSelection {
-                    clipboard,
-                    transparent: false,
-                    source_index: Some(idx),
-                });
-                self.clear_selection();
-            }
+        let activation = self.with_editor_session_mut(|editor, _| editor.activate_swatch(idx));
+        if activation == SwatchActivation::ActivatedFloating {
+            self.end_paint_stroke();
         }
     }
 
     fn toggle_float_transparency(&mut self) {
-        if let Some(ref mut floating) = self.floating {
-            floating.transparent = !floating.transparent;
-        }
+        self.with_editor_session_mut(|editor, _| editor.toggle_float_transparency());
     }
 
     fn stamp_floating(&mut self) {
-        let Some(floating) = self.floating.take() else {
-            return;
-        };
-        let pos = self.cursor;
-        let transparent = floating.transparent;
-        let clipboard = floating.clipboard.clone();
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| {
-            for y in 0..clipboard.height {
-                for x in 0..clipboard.width {
-                    let target_x = pos.x + x;
-                    let target_y = pos.y + y;
-                    if target_x >= canvas.width || target_y >= canvas.height {
-                        continue;
-                    }
-                    let target = Pos {
-                        x: target_x,
-                        y: target_y,
-                    };
-                    match clipboard.get(x, y) {
-                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                            let _ = canvas.put_glyph_colored(target, ch, color);
-                        }
-                        Some(CellValue::WideCont) => {}
-                        None if !transparent => canvas.clear(target),
-                        None => {}
-                    }
-                }
-            }
+        let before = self.canvas.clone();
+        let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_stamp_floating(editor, canvas, color)
         });
-        self.floating = Some(floating);
-    }
-
-    fn stamp_onto_canvas(&mut self) {
-        let Some(floating) = self.floating.take() else {
-            return;
-        };
-        let pos = self.cursor;
-        let transparent = floating.transparent;
-        let clipboard = floating.clipboard.clone();
-        let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| {
-            for y in 0..clipboard.height {
-                for x in 0..clipboard.width {
-                    let tx = pos.x + x;
-                    let ty = pos.y + y;
-                    if tx < canvas.width && ty < canvas.height {
-                        let target = Pos { x: tx, y: ty };
-                        match clipboard.get(x, y) {
-                            Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                                let _ = canvas.put_glyph_colored(target, ch, color);
-                            }
-                            Some(CellValue::WideCont) => {}
-                            None if !transparent => canvas.clear(target),
-                            None => {}
-                        }
-                    }
-                }
-            }
-        });
-        self.floating = Some(floating);
+        if changed {
+            self.finish_canvas_edit(before);
+        }
     }
 
     fn begin_paint_stroke(&mut self) {
         self.paint_canvas_before = Some(self.canvas.clone());
-        self.paint_stroke_anchor = Some(self.cursor);
-        self.paint_stroke_last = None;
+        self.with_editor_session_mut(|editor, _| editor_begin_paint_stroke(editor));
     }
 
     fn end_paint_stroke(&mut self) {
@@ -1160,335 +785,70 @@ impl App {
                 self.redo_stack.clear();
             }
         }
-        self.paint_stroke_anchor = None;
-        self.paint_stroke_last = None;
+        self.with_editor_session_mut(|editor, _| editor_end_paint_stroke(editor));
     }
 
     fn dismiss_floating(&mut self) {
         self.end_paint_stroke();
-        self.floating = None;
-    }
-
-    fn floating_brush_width(&self) -> usize {
-        self.floating
-            .as_ref()
-            .map(|floating| floating.clipboard.width.max(1))
-            .unwrap_or(1)
-    }
-
-    fn snap_horizontal_brush_x(anchor_x: usize, raw_x: usize, brush_width: usize) -> usize {
-        if brush_width <= 1 {
-            return raw_x;
-        }
-
-        if raw_x >= anchor_x {
-            anchor_x + ((raw_x - anchor_x) / brush_width) * brush_width
-        } else {
-            anchor_x - ((anchor_x - raw_x) / brush_width) * brush_width
-        }
-    }
-
-    fn paint_floating_at_cursor(&mut self) {
-        self.stamp_onto_canvas();
-        self.paint_stroke_last = Some(self.cursor);
-    }
-
-    fn line_points(start: Pos, end: Pos) -> Vec<Pos> {
-        let mut points = Vec::new();
-        let mut x = start.x as isize;
-        let mut y = start.y as isize;
-        let target_x = end.x as isize;
-        let target_y = end.y as isize;
-        let dx = (target_x - x).abs();
-        let sx = if x < target_x { 1 } else { -1 };
-        let dy = -(target_y - y).abs();
-        let sy = if y < target_y { 1 } else { -1 };
-        let mut err = dx + dy;
-
-        loop {
-            points.push(Pos {
-                x: x as usize,
-                y: y as usize,
-            });
-
-            if x == target_x && y == target_y {
-                break;
-            }
-
-            let twice_err = 2 * err;
-            if twice_err >= dy {
-                err += dy;
-                x += sx;
-            }
-            if twice_err <= dx {
-                err += dx;
-                y += sy;
-            }
-        }
-
-        points
-    }
-
-    fn paint_floating_diagonal_segment(&mut self, start: Pos, end: Pos, brush_width: usize) {
-        let mut last_stamped = start;
-        for point in Self::line_points(start, end).into_iter().skip(1) {
-            let should_stamp =
-                point.y != last_stamped.y || point.x.abs_diff(last_stamped.x) >= brush_width;
-            if !should_stamp {
-                continue;
-            }
-
-            self.cursor = point;
-            self.paint_floating_at_cursor();
-            last_stamped = point;
-        }
-
-        let should_stamp_end =
-            end.y != last_stamped.y || end.x.abs_diff(last_stamped.x) >= brush_width;
-        if should_stamp_end {
-            self.cursor = end;
-            self.paint_floating_at_cursor();
-        }
+        self.with_editor_session_mut(|editor, _| editor_dismiss_floating(editor));
     }
 
     fn paint_floating_drag(&mut self, raw_pos: Pos) {
-        let Some(last) = self.paint_stroke_last else {
-            self.cursor = raw_pos;
-            self.paint_floating_at_cursor();
-            return;
-        };
-
-        let anchor = self.paint_stroke_anchor.unwrap_or(last);
-        let brush_width = self.floating_brush_width();
-        let is_pure_horizontal =
-            brush_width > 1 && raw_pos.y == last.y && raw_pos.y == anchor.y && last.y == anchor.y;
-
-        if is_pure_horizontal {
-            let anchor_x = anchor.x;
-            let snapped_x = Self::snap_horizontal_brush_x(anchor_x, raw_pos.x, brush_width);
-            let target = Pos {
-                x: snapped_x,
-                y: raw_pos.y,
-            };
-
-            if target == last {
-                return;
-            }
-
-            self.cursor = target;
-            self.paint_floating_at_cursor();
-            return;
+        let color = self.active_user_color();
+        let before = self.canvas.clone();
+        let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_paint_floating_drag(editor, canvas, raw_pos, color)
+        });
+        if changed {
+            self.finish_canvas_edit(before);
         }
-
-        if brush_width > 1 && raw_pos.y == last.y {
-            if raw_pos.x.abs_diff(last.x) < brush_width {
-                return;
-            }
-
-            self.cursor = raw_pos;
-            self.paint_floating_at_cursor();
-            return;
-        }
-
-        if brush_width > 1 && raw_pos.y != last.y {
-            self.paint_floating_diagonal_segment(last, raw_pos, brush_width);
-            return;
-        }
-
-        if raw_pos == last {
-            return;
-        }
-
-        self.cursor = raw_pos;
-        self.paint_floating_at_cursor();
     }
 
+    #[cfg(test)]
     fn paste_clipboard(&mut self) {
-        let Some(clipboard) = self.swatches[0].as_ref().map(|s| s.clipboard.clone()) else {
-            return;
-        };
-
-        let cursor = self.cursor;
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| {
-            for y in 0..clipboard.height {
-                for x in 0..clipboard.width {
-                    let target_x = cursor.x + x;
-                    let target_y = cursor.y + y;
-                    if target_x >= canvas.width || target_y >= canvas.height {
-                        continue;
-                    }
-                    let target = Pos {
-                        x: target_x,
-                        y: target_y,
-                    };
-                    match clipboard.get(x, y) {
-                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                            let _ = canvas.put_glyph_colored(target, ch, color);
-                        }
-                        Some(CellValue::WideCont) => {}
-                        None => canvas.clear(target),
-                    }
-                }
-            }
+        let before = self.canvas.clone();
+        let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_paste_primary_swatch(editor, canvas, color)
         });
+        if changed {
+            self.finish_canvas_edit(before);
+        }
     }
 
+    #[cfg(test)]
     fn smart_fill(&mut self) {
-        let selection = self.selection();
-        let bounds = self.selection_or_cursor_bounds();
-        let ch = if bounds.width() == 1 && bounds.height() > 1 {
-            '|'
-        } else if bounds.height() == 1 && bounds.width() > 1 {
-            '-'
-        } else {
-            '*'
-        };
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| match selection {
-            Some(selection) => Self::fill_selection_on(canvas, selection, bounds, ch, color),
-            None => Self::fill_bounds_on(canvas, bounds, ch, color),
-        });
+        let editor = self.editor_session_snapshot();
+        self.apply_canvas_edit(|canvas| editor_smart_fill(&editor, canvas, color));
     }
 
+    #[cfg(test)]
     fn draw_border(&mut self) {
-        let Some(selection) = self.selection() else {
-            return;
-        };
-        let bounds = selection.bounds();
-
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| {
-            if selection.shape == SelectionShape::Ellipse {
-                Self::draw_selection_border_on(canvas, selection, bounds, color);
-                return;
-            }
-
-            if bounds.width() == 1 && bounds.height() == 1 {
-                canvas.set_colored(
-                    Pos {
-                        x: bounds.min_x,
-                        y: bounds.min_y,
-                    },
-                    '*',
-                    color,
-                );
-                return;
-            }
-
-            if bounds.height() == 1 {
-                canvas.set_colored(
-                    Pos {
-                        x: bounds.min_x,
-                        y: bounds.min_y,
-                    },
-                    '.',
-                    color,
-                );
-                for x in (bounds.min_x + 1)..bounds.max_x {
-                    canvas.set_colored(Pos { x, y: bounds.min_y }, '-', color);
-                }
-                canvas.set_colored(
-                    Pos {
-                        x: bounds.max_x,
-                        y: bounds.min_y,
-                    },
-                    '.',
-                    color,
-                );
-                return;
-            }
-
-            if bounds.width() == 1 {
-                canvas.set_colored(
-                    Pos {
-                        x: bounds.min_x,
-                        y: bounds.min_y,
-                    },
-                    '.',
-                    color,
-                );
-                for y in (bounds.min_y + 1)..bounds.max_y {
-                    canvas.set_colored(Pos { x: bounds.min_x, y }, '|', color);
-                }
-                canvas.set_colored(
-                    Pos {
-                        x: bounds.min_x,
-                        y: bounds.max_y,
-                    },
-                    '`',
-                    color,
-                );
-                return;
-            }
-
-            canvas.set_colored(
-                Pos {
-                    x: bounds.min_x,
-                    y: bounds.min_y,
-                },
-                '.',
-                color,
-            );
-            canvas.set_colored(
-                Pos {
-                    x: bounds.max_x,
-                    y: bounds.min_y,
-                },
-                '.',
-                color,
-            );
-            canvas.set_colored(
-                Pos {
-                    x: bounds.min_x,
-                    y: bounds.max_y,
-                },
-                '`',
-                color,
-            );
-            canvas.set_colored(
-                Pos {
-                    x: bounds.max_x,
-                    y: bounds.max_y,
-                },
-                '\'',
-                color,
-            );
-
-            for x in (bounds.min_x + 1)..bounds.max_x {
-                canvas.set_colored(Pos { x, y: bounds.min_y }, '-', color);
-                canvas.set_colored(Pos { x, y: bounds.max_y }, '-', color);
-            }
-
-            for y in (bounds.min_y + 1)..bounds.max_y {
-                canvas.set_colored(Pos { x: bounds.min_x, y }, '|', color);
-                canvas.set_colored(Pos { x: bounds.max_x, y }, '|', color);
-            }
+        let before = self.canvas.clone();
+        let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_draw_selection_border(editor, canvas, color)
         });
+        if changed {
+            self.finish_canvas_edit(before);
+        }
     }
 
+    #[cfg(test)]
     fn fill_selection_or_cell(&mut self, ch: char) {
-        let selection = self.selection();
-        let bounds = self
-            .selection_or_cursor_bounds()
-            .normalized_for_canvas(&self.canvas);
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| match selection {
-            Some(selection) => Self::fill_selection_on(canvas, selection, bounds, ch, color),
-            None => Self::fill_bounds_on(canvas, bounds, ch, color),
-        });
+        let editor = self.editor_session_snapshot();
+        self.apply_canvas_edit(|canvas| editor_fill_selection_or_cell(&editor, canvas, ch, color));
     }
 
     fn insert_char(&mut self, ch: char) {
-        let cursor = self.cursor;
-        let width = Canvas::display_width(ch);
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| {
-            let _ = canvas.put_glyph_colored(cursor, ch, color);
+        let before = self.canvas.clone();
+        let _ = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_insert_char(editor, canvas, ch, color)
         });
-        for _ in 0..width {
-            self.move_right();
-        }
+        self.finish_canvas_edit(before);
     }
 
     fn open_emoji_picker(&mut self) {
@@ -1709,208 +1069,22 @@ impl App {
     }
 
     fn paste_text_block(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-
-        let origin = self.cursor;
         let color = self.active_user_color();
-        self.apply_canvas_edit(|canvas| {
-            let mut x = origin.x;
-            let mut y = origin.y;
-
-            for ch in text.chars() {
-                match ch {
-                    '\r' => {}
-                    '\n' => {
-                        x = origin.x;
-                        y += 1;
-                        if y >= canvas.height {
-                            break;
-                        }
-                    }
-                    _ => {
-                        if x < canvas.width && y < canvas.height {
-                            let _ = canvas.put_glyph_colored(Pos { x, y }, ch, color);
-                        }
-                        x += Canvas::display_width(ch);
-                    }
-                }
-            }
-        });
+        let before = self.canvas.clone();
+        let editor = self.editor_session_snapshot();
+        let changed = editor_paste_text_block(&editor, &mut self.canvas, text, color);
+        if changed {
+            self.finish_canvas_edit(before);
+        }
     }
 
+    #[cfg(test)]
     fn backspace(&mut self) {
-        self.move_left();
-        let origin = self.canvas.glyph_origin(self.cursor);
-        let cursor = self.cursor;
-        self.apply_canvas_edit(|canvas| canvas.clear(cursor));
-        if let Some(origin) = origin {
-            self.cursor = origin;
+        let before = self.canvas.clone();
+        let changed = self.with_editor_and_canvas_mut(editor_backspace);
+        if changed {
+            self.finish_canvas_edit(before);
         }
-    }
-
-    fn delete_at_cursor(&mut self) {
-        if let Some(origin) = self.canvas.glyph_origin(self.cursor) {
-            self.cursor = origin;
-        }
-        let cursor = self.cursor;
-        self.apply_canvas_edit(|canvas| canvas.clear(cursor));
-    }
-
-    fn push_left(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.push_left(y, x));
-    }
-
-    fn push_down(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.push_down(x, y));
-    }
-
-    fn push_up(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.push_up(x, y));
-    }
-
-    fn push_right(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.push_right(y, x));
-    }
-
-    fn pull_from_left(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.pull_from_left(y, x));
-    }
-
-    fn pull_from_down(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.pull_from_down(x, y));
-    }
-
-    fn pull_from_up(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.pull_from_up(x, y));
-    }
-
-    fn pull_from_right(&mut self) {
-        let x = self
-            .canvas
-            .glyph_origin(self.cursor)
-            .map(|pos| pos.x)
-            .unwrap_or(self.cursor.x);
-        let y = self.cursor.y;
-        self.apply_canvas_edit(|canvas| canvas.pull_from_right(y, x));
-    }
-
-    fn transpose_selection_corner(&mut self) -> bool {
-        if !self.mode.is_selecting() {
-            return false;
-        }
-
-        let Some(anchor) = self.selection_anchor else {
-            return false;
-        };
-
-        self.selection_anchor = Some(self.cursor);
-        self.cursor = anchor;
-        true
-    }
-
-    fn handle_control_key(&mut self, key: AppKey) -> bool {
-        if key.modifiers.shift {
-            match key.code {
-                AppKeyCode::Left => {
-                    self.pan_by(-1, 0);
-                    return true;
-                }
-                AppKeyCode::Right => {
-                    self.pan_by(1, 0);
-                    return true;
-                }
-                AppKeyCode::Up => {
-                    self.pan_by(0, -1);
-                    return true;
-                }
-                AppKeyCode::Down => {
-                    self.pan_by(0, 1);
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        match key.code {
-            AppKeyCode::Backspace | AppKeyCode::Char('h') => self.push_left(),
-            AppKeyCode::Char('j') => self.push_down(),
-            AppKeyCode::Char('k') => self.push_up(),
-            AppKeyCode::Char('l') => self.push_right(),
-            AppKeyCode::Char('y') => self.pull_from_left(),
-            AppKeyCode::Char('u') => self.pull_from_down(),
-            AppKeyCode::Tab | AppKeyCode::Char('i') => self.pull_from_up(),
-            AppKeyCode::Char('o') => self.pull_from_right(),
-            AppKeyCode::Char('c') => self.copy_selection_or_cell(),
-            AppKeyCode::Char('x') => self.cut_selection_or_cell(),
-            AppKeyCode::Char('v') => self.paste_clipboard(),
-            AppKeyCode::Char('b') => self.draw_border(),
-            AppKeyCode::Char('r') => self.redo(),
-            AppKeyCode::Char('t') => return self.transpose_selection_corner(),
-            AppKeyCode::Char('z') => self.undo(),
-            AppKeyCode::Char(' ') => self.smart_fill(),
-            AppKeyCode::Char(ch) if swatch_home_row_index(ch).is_some() => {
-                self.activate_swatch(swatch_home_row_index(ch).unwrap());
-            }
-            _ => return false,
-        }
-
-        true
-    }
-
-    fn handle_alt_key(&mut self, key: AppKey) -> Option<Vec<HostEffect>> {
-        match key.code {
-            AppKeyCode::Char('c') => return Some(vec![self.copy_to_system_clipboard_effect()]),
-            AppKeyCode::Left => self.pan_by(-1, 0),
-            AppKeyCode::Right => self.pan_by(1, 0),
-            AppKeyCode::Up => self.pan_by(0, -1),
-            AppKeyCode::Down => self.pan_by(0, 1),
-            _ => return None,
-        }
-
-        Some(Vec::new())
     }
 
     fn is_open_picker_key(key: AppKey) -> bool {
@@ -2054,7 +1228,7 @@ impl App {
                     if let Some(pos) = canvas_pos {
                         self.cursor = pos;
                         self.begin_paint_stroke();
-                        self.paint_floating_at_cursor();
+                        self.paint_floating_drag(pos);
                     }
                 }
                 AppPointerKind::Drag(AppPointerButton::Left) => {
@@ -2176,76 +1350,25 @@ impl App {
             }
         }
 
-        if key.modifiers.ctrl && self.handle_control_key(key) {
+        if key.modifiers.ctrl && key.code == AppKeyCode::Char('r') {
+            self.redo();
             return Vec::new();
         }
 
-        if key.modifiers.has_alt_like() {
-            if let Some(effects) = self.handle_alt_key(key) {
-                return effects;
-            }
-        }
-
-        let shift = key.modifiers.shift;
-        let is_move = matches!(
-            key.code,
-            AppKeyCode::Up
-                | AppKeyCode::Down
-                | AppKeyCode::Left
-                | AppKeyCode::Right
-                | AppKeyCode::Home
-                | AppKeyCode::End
-                | AppKeyCode::PageUp
-                | AppKeyCode::PageDown
-        );
-
-        if is_move && shift {
-            self.begin_selection();
-            match key.code {
-                AppKeyCode::Up => self.move_up(),
-                AppKeyCode::Down => self.move_down(),
-                AppKeyCode::Left => self.move_left(),
-                AppKeyCode::Right => self.move_right(),
-                AppKeyCode::Home => self.cursor.x = self.visible_bounds().min_x,
-                AppKeyCode::End => self.cursor.x = self.visible_bounds().max_x,
-                AppKeyCode::PageUp => self.cursor.y = self.visible_bounds().min_y,
-                AppKeyCode::PageDown => self.cursor.y = self.visible_bounds().max_y,
-                _ => {}
-            }
+        if key.modifiers.ctrl && key.code == AppKeyCode::Char('z') {
+            self.undo();
             return Vec::new();
         }
 
-        if is_move && self.mode.is_selecting() {
-            self.clear_selection();
+        let color = self.active_user_color();
+        let before = self.canvas.clone();
+        let dispatch = self.with_editor_and_canvas_mut(|editor, canvas| {
+            editor_handle_key_press(editor, canvas, key, color)
+        });
+        if self.canvas != before {
+            self.finish_canvas_edit(before);
         }
-
-        match key.code {
-            AppKeyCode::Up => self.move_up(),
-            AppKeyCode::Down => self.move_down(),
-            AppKeyCode::Left => self.move_left(),
-            AppKeyCode::Right => self.move_right(),
-            AppKeyCode::Home => self.cursor.x = self.visible_bounds().min_x,
-            AppKeyCode::End => self.cursor.x = self.visible_bounds().max_x,
-            AppKeyCode::PageUp => self.cursor.y = self.visible_bounds().min_y,
-            AppKeyCode::PageDown => self.cursor.y = self.visible_bounds().max_y,
-            AppKeyCode::Enter => self.move_down(),
-            AppKeyCode::Esc => self.clear_selection(),
-            _ if self.mode.is_selecting() && self.selection_anchor.is_some() => match key.code {
-                AppKeyCode::Char(ch) => self.fill_selection_or_cell(ch),
-                AppKeyCode::Backspace | AppKeyCode::Delete => self.fill_selection_or_cell(' '),
-                _ => {}
-            },
-            _ => match key.code {
-                AppKeyCode::Char(ch) => {
-                    self.insert_char(ch);
-                }
-                AppKeyCode::Backspace => self.backspace(),
-                AppKeyCode::Delete => self.delete_at_cursor(),
-                _ => {}
-            },
-        }
-
-        Vec::new()
+        dispatch.effects
     }
 
     #[cfg(test)]

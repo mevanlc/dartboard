@@ -59,11 +59,18 @@ This is the first real move toward a reusable editor crate:
 - `late-sh` can target a lower-level crate for input/effect/model types
 - `dartboard` now consumes those shared definitions instead of owning them all locally
 - standalone `App` now stores/restores per-user state through `EditorSession` instead of a fully local-only shape
+- `dartboard-editor` now also owns the reusable viewport/cursor/selection state transitions (`set_viewport`, cursor motion, pan/clamp, selection bounds helpers)
+- `dartboard-editor` now owns swatch history rotation/pinning plus floating-selection activation/transparency toggles
+- `dartboard-editor` now owns pure canvas helpers for selection capture/export and selection-aware fill/border drawing
+- `dartboard-editor` now owns clipboard stamping and smart-fill glyph selection helpers
+- `dartboard-editor` now owns local cut/copy/paste/fill/border command helpers that operate on `EditorSession` + canvas
+- `dartboard-editor` now owns floating paint/stamp state transitions (`begin/end`, dismiss, drag/stamp behavior) against session + canvas
+- `dartboard-editor` now owns the non-shell key dispatch path for editor behavior (movement, selection growth/clear, alt pan/copy, control editing commands, text insertion/deletion)
 
 What it does not own yet:
-- command handling and mutation logic
+- pointer intent routing and floating-specific key/pointer dispatch that still depends on standalone undo grouping
 - canvas ownership and undo/redo orchestration
-- viewport/cursor/selection/swatches/floating behavior as a reusable command layer
+- the broader host-effect policy beyond direct editor clipboard export
 
 ### Explicit full-session handshake rejection
 - `ServerMsg::ConnectRejected`
