@@ -88,16 +88,48 @@ pub enum SwatchZone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HelpTab {
     #[default]
-    Common,
-    Advanced,
+    Guide,
+    Drawing,
+    Selection,
+    Clipboard,
+    Transform,
+    Session,
 }
 
 impl HelpTab {
-    pub fn toggle(self) -> Self {
+    pub const ALL: [HelpTab; 6] = [
+        HelpTab::Guide,
+        HelpTab::Drawing,
+        HelpTab::Selection,
+        HelpTab::Clipboard,
+        HelpTab::Transform,
+        HelpTab::Session,
+    ];
+
+    pub fn label(self) -> &'static str {
         match self {
-            HelpTab::Common => HelpTab::Advanced,
-            HelpTab::Advanced => HelpTab::Common,
+            HelpTab::Guide => "guide",
+            HelpTab::Drawing => "drawing",
+            HelpTab::Selection => "selection",
+            HelpTab::Clipboard => "clipboard",
+            HelpTab::Transform => "transform",
+            HelpTab::Session => "session",
         }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    pub fn next(self) -> Self {
+        let i = (self.index() + 1) % Self::ALL.len();
+        Self::ALL[i]
+    }
+
+    pub fn prev(self) -> Self {
+        let n = Self::ALL.len();
+        let i = (self.index() + n - 1) % n;
+        Self::ALL[i]
     }
 }
 
@@ -138,7 +170,8 @@ pub struct App {
     pub icon_catalog: Option<emoji::catalog::IconCatalogData>,
     pub swatch_body_hits: [Option<Rect>; SWATCH_CAPACITY],
     pub swatch_pin_hits: [Option<Rect>; SWATCH_CAPACITY],
-    pub help_tab_hits: [Option<(HelpTab, Rect)>; 2],
+    pub help_tab_hits: Vec<(HelpTab, Rect)>,
+    pub help_scroll: u16,
     paint_canvas_before: Option<Canvas>,
     paint_stroke_anchor: Option<Pos>,
     paint_stroke_last: Option<Pos>,
@@ -285,7 +318,8 @@ impl App {
             icon_catalog: None,
             swatch_body_hits: [None; SWATCH_CAPACITY],
             swatch_pin_hits: [None; SWATCH_CAPACITY],
-            help_tab_hits: [None; 2],
+            help_tab_hits: Vec::new(),
+            help_scroll: 0,
             paint_canvas_before: current_session.paint_canvas_before,
             paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
             paint_stroke_last: current_session.editor.paint_stroke_last,
@@ -333,7 +367,8 @@ impl App {
             icon_catalog: None,
             swatch_body_hits: [None; SWATCH_CAPACITY],
             swatch_pin_hits: [None; SWATCH_CAPACITY],
-            help_tab_hits: [None; 2],
+            help_tab_hits: Vec::new(),
+            help_scroll: 0,
             paint_canvas_before: current_session.paint_canvas_before,
             paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
             paint_stroke_last: current_session.editor.paint_stroke_last,
@@ -630,13 +665,10 @@ impl App {
     }
 
     fn help_tab_hit(&self, col: u16, row: u16) -> Option<HelpTab> {
-        for maybe in self.help_tab_hits.iter() {
-            let Some((tab, rect)) = maybe else { continue };
-            if rect_contains(rect, col, row) {
-                return Some(*tab);
-            }
-        }
-        None
+        self.help_tab_hits
+            .iter()
+            .find(|(_, rect)| rect_contains(rect, col, row))
+            .map(|(tab, _)| *tab)
     }
 
     pub fn set_viewport(&mut self, viewport: Rect) {
@@ -1090,9 +1122,27 @@ impl App {
             match key.code {
                 AppKeyCode::Esc | AppKeyCode::F(1) => self.show_help = false,
                 AppKeyCode::Char('p') if key.modifiers.ctrl => self.show_help = false,
-                AppKeyCode::Tab | AppKeyCode::BackTab => {
-                    self.help_tab = self.help_tab.toggle();
+                AppKeyCode::Tab | AppKeyCode::Right => {
+                    self.help_tab = self.help_tab.next();
+                    self.help_scroll = 0;
                 }
+                AppKeyCode::BackTab | AppKeyCode::Left => {
+                    self.help_tab = self.help_tab.prev();
+                    self.help_scroll = 0;
+                }
+                AppKeyCode::Down | AppKeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                }
+                AppKeyCode::Up | AppKeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                AppKeyCode::PageDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(5);
+                }
+                AppKeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(5);
+                }
+                AppKeyCode::Home => self.help_scroll = 0,
                 _ => {}
             }
             return Vec::new();
@@ -1126,6 +1176,9 @@ impl App {
         if self.show_help {
             if matches!(mouse.kind, AppPointerKind::Down(AppPointerButton::Left)) {
                 if let Some(tab) = self.help_tab_hit(mouse.column, mouse.row) {
+                    if self.help_tab != tab {
+                        self.help_scroll = 0;
+                    }
                     self.help_tab = tab;
                 }
             }
@@ -1657,11 +1710,19 @@ mod tests {
     fn tab_cycles_help_tabs_when_help_open() {
         let mut app = App::new();
         app.show_help = true;
-        assert_eq!(app.help_tab, HelpTab::Common);
+        assert_eq!(app.help_tab, HelpTab::Guide);
 
-        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
-
-        assert_eq!(app.help_tab, HelpTab::Advanced);
+        for expected in [
+            HelpTab::Drawing,
+            HelpTab::Selection,
+            HelpTab::Clipboard,
+            HelpTab::Transform,
+            HelpTab::Session,
+            HelpTab::Guide,
+        ] {
+            app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            assert_eq!(app.help_tab, expected);
+        }
         assert_eq!(app.active_user_idx, 0);
         assert!(app.show_help);
 
@@ -1670,7 +1731,7 @@ mod tests {
             KeyModifiers::SHIFT,
         )));
 
-        assert_eq!(app.help_tab, HelpTab::Common);
+        assert_eq!(app.help_tab, HelpTab::Session);
         assert_eq!(app.active_user_idx, 0);
     }
 

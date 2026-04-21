@@ -44,7 +44,10 @@ use dartboard_core::{ops::CellWrite, Canvas, CanvasOp, CellValue, Pos, RgbColor}
 pub mod keymap;
 pub mod session_mirror;
 
-pub use keymap::{ActionSpec, BindingContext, EditorContext, KeyBinding, KeyMap, KeyTrigger};
+pub use keymap::{
+    ActionSpec, BindingContext, EditorContext, HelpEntry, HelpSection, KeyBinding, KeyMap,
+    KeyTrigger,
+};
 pub use session_mirror::{ConnectState, MirrorEvent, SessionMirror};
 
 pub const SWATCH_CAPACITY: usize = 5;

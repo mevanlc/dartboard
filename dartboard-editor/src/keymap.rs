@@ -37,6 +37,30 @@ pub struct KeyBinding {
     pub action: ActionSpec,
     pub context: BindingContext,
     pub description: &'static str,
+    help: Option<BindingHelp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HelpSection {
+    Drawing,
+    Selection,
+    Clipboard,
+    Transform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelpEntry {
+    pub section: HelpSection,
+    pub keys: &'static str,
+    pub description: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BindingHelp {
+    section: HelpSection,
+    keys: &'static str,
+    description: &'static str,
+    order: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +79,19 @@ impl KeyMap {
 
     pub fn bindings(&self) -> &[KeyBinding] {
         &self.bindings
+    }
+
+    pub fn help_entries(&self) -> Vec<HelpEntry> {
+        let mut rows: Vec<BindingHelp> = self.bindings.iter().filter_map(|b| b.help).collect();
+        rows.sort_by_key(|row| (row.section, row.order, row.keys, row.description));
+        rows.dedup();
+        rows.into_iter()
+            .map(|row| HelpEntry {
+                section: row.section,
+                keys: row.keys,
+                description: row.description,
+            })
+            .collect()
     }
 
     pub fn resolve(&self, key: AppKey, ctx: EditorContext) -> Option<EditorAction> {
@@ -136,6 +173,14 @@ pub(crate) fn swatch_home_row_index(ch: char) -> Option<usize> {
 
 fn default_standalone_bindings() -> Vec<KeyBinding> {
     let mut out = Vec::new();
+    let help = |section, keys, description, order| {
+        Some(BindingHelp {
+            section,
+            keys,
+            description,
+            order,
+        })
+    };
 
     let none = AppModifiers::default();
     let shift = AppModifiers {
@@ -175,6 +220,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             action: ActionSpec::Fixed(EditorAction::Pan { dx, dy }),
             context: BindingContext::Always,
             description: "pan viewport",
+            help: help(HelpSection::Drawing, "^⇧+←↑↓→", "pan viewport", 80),
         });
     }
 
@@ -188,81 +234,111 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         action: ActionSpec::Fixed(EditorAction::ToggleFloatingTransparency),
         context: BindingContext::WhenFloating,
         description: "toggle float transparency",
+        help: help(HelpSection::Selection, "^T", "flip corner / see-thru", 80),
     });
 
     // Ctrl+key editor commands.
-    for (code, action, desc) in [
+    for (code, action, desc, binding_help) in [
         (
             AppKeyCode::Backspace,
             EditorAction::PushLeft,
             "push column left",
+            help(HelpSection::Transform, "^H / ^⌫", "push column ←", 10),
         ),
         (
             AppKeyCode::Char('h'),
             EditorAction::PushLeft,
             "push column left",
+            help(HelpSection::Transform, "^H / ^⌫", "push column ←", 10),
         ),
         (
             AppKeyCode::Char('j'),
             EditorAction::PushDown,
             "push row down",
+            help(HelpSection::Transform, "^J", "push row ↓", 20),
         ),
-        (AppKeyCode::Char('k'), EditorAction::PushUp, "push row up"),
+        (
+            AppKeyCode::Char('k'),
+            EditorAction::PushUp,
+            "push row up",
+            help(HelpSection::Transform, "^K", "push row ↑", 30),
+        ),
         (
             AppKeyCode::Char('l'),
             EditorAction::PushRight,
             "push column right",
+            help(HelpSection::Transform, "^L", "push column →", 40),
         ),
         (
             AppKeyCode::Char('y'),
             EditorAction::PullFromLeft,
             "pull from left",
+            help(HelpSection::Transform, "^Y", "pull from ←", 50),
         ),
         (
             AppKeyCode::Char('u'),
             EditorAction::PullFromDown,
             "pull from below",
+            help(HelpSection::Transform, "^U", "pull from ↓", 60),
         ),
-        (AppKeyCode::Tab, EditorAction::PullFromUp, "pull from above"),
+        (
+            AppKeyCode::Tab,
+            EditorAction::PullFromUp,
+            "pull from above",
+            help(HelpSection::Transform, "^I / tab", "pull from ↑", 70),
+        ),
         (
             AppKeyCode::Char('i'),
             EditorAction::PullFromUp,
             "pull from above",
+            help(HelpSection::Transform, "^I / tab", "pull from ↑", 70),
         ),
         (
             AppKeyCode::Char('o'),
             EditorAction::PullFromRight,
             "pull from right",
+            help(HelpSection::Transform, "^O", "pull from →", 80),
         ),
         (
             AppKeyCode::Char('c'),
             EditorAction::CopySelection,
             "copy selection",
+            help(HelpSection::Clipboard, "^C", "copy → swatch", 10),
         ),
         (
             AppKeyCode::Char('x'),
             EditorAction::CutSelection,
             "cut selection",
+            help(HelpSection::Clipboard, "^X", "cut → swatch", 20),
         ),
         (
             AppKeyCode::Char('v'),
             EditorAction::PastePrimarySwatch,
             "paste primary swatch",
+            help(HelpSection::Clipboard, "^V", "paste / stamp", 30),
         ),
         (
             AppKeyCode::Char('b'),
             EditorAction::DrawBorder,
             "draw selection border",
+            help(HelpSection::Transform, "^B", "draw selection border", 90),
         ),
         (
             AppKeyCode::Char('t'),
             EditorAction::TransposeSelectionCorner,
             "transpose selection corner",
+            help(HelpSection::Selection, "^T", "flip corner / see-thru", 80),
         ),
         (
             AppKeyCode::Char(' '),
             EditorAction::SmartFill,
             "smart-fill selection",
+            help(
+                HelpSection::Transform,
+                "^space",
+                "fill selection or cell",
+                100,
+            ),
         ),
     ] {
         out.push(KeyBinding {
@@ -273,6 +349,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             action: ActionSpec::Fixed(action),
             context: BindingContext::Always,
             description: desc,
+            help: binding_help,
         });
     }
 
@@ -282,9 +359,15 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         action: ActionSpec::ActivateSwatchFromChar,
         context: BindingContext::Always,
         description: "activate swatch slot",
+        help: help(
+            HelpSection::Clipboard,
+            "^A/^S/^D/^F/^G",
+            "lift swatch 1..5",
+            50,
+        ),
     });
 
-    // Alt/Meta + c -> export to system clipboard; Alt/Meta + arrows -> pan.
+    // Alt/Meta + c -> export to system clipboard; Alt/Meta + ←↑↓→ -> pan.
     for mods in [alt, meta] {
         out.push(KeyBinding {
             trigger: KeyTrigger::Key(AppKey {
@@ -294,6 +377,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             action: ActionSpec::Fixed(EditorAction::ExportSystemClipboard),
             context: BindingContext::Always,
             description: "copy to system clipboard",
+            help: help(HelpSection::Clipboard, "alt/meta+c", "os copy", 40),
         });
         for (code, dx, dy) in [
             (AppKeyCode::Left, -1_isize, 0_isize),
@@ -309,20 +393,101 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
                 action: ActionSpec::Fixed(EditorAction::Pan { dx, dy }),
                 context: BindingContext::Always,
                 description: "pan viewport",
+                help: help(HelpSection::Drawing, "alt/meta+←↑↓→", "pan viewport", 90),
             });
         }
     }
 
     // Move keys: shift extends selection; plain moves cursor.
-    for (code, dir) in [
-        (AppKeyCode::Up, MoveDir::Up),
-        (AppKeyCode::Down, MoveDir::Down),
-        (AppKeyCode::Left, MoveDir::Left),
-        (AppKeyCode::Right, MoveDir::Right),
-        (AppKeyCode::Home, MoveDir::LineStart),
-        (AppKeyCode::End, MoveDir::LineEnd),
-        (AppKeyCode::PageUp, MoveDir::PageUp),
-        (AppKeyCode::PageDown, MoveDir::PageDown),
+    for (code, dir, move_help, extend_help) in [
+        (
+            AppKeyCode::Up,
+            MoveDir::Up,
+            help(HelpSection::Drawing, "←↑↓→", "move cursor", 40),
+            help(
+                HelpSection::Selection,
+                "shift+←↑↓→",
+                "create/extend selection",
+                10,
+            ),
+        ),
+        (
+            AppKeyCode::Down,
+            MoveDir::Down,
+            help(HelpSection::Drawing, "←↑↓→", "move cursor", 40),
+            help(
+                HelpSection::Selection,
+                "shift+←↑↓→",
+                "create/extend selection",
+                10,
+            ),
+        ),
+        (
+            AppKeyCode::Left,
+            MoveDir::Left,
+            help(HelpSection::Drawing, "←↑↓→", "move cursor", 40),
+            help(
+                HelpSection::Selection,
+                "shift+←↑↓→",
+                "create/extend selection",
+                10,
+            ),
+        ),
+        (
+            AppKeyCode::Right,
+            MoveDir::Right,
+            help(HelpSection::Drawing, "←↑↓→", "move cursor", 40),
+            help(
+                HelpSection::Selection,
+                "shift+←↑↓→",
+                "create/extend selection",
+                10,
+            ),
+        ),
+        (
+            AppKeyCode::Home,
+            MoveDir::LineStart,
+            help(HelpSection::Drawing, "home / end", "← / → edge", 50),
+            help(
+                HelpSection::Selection,
+                "shift+home / end",
+                "extend to ← / → edge",
+                20,
+            ),
+        ),
+        (
+            AppKeyCode::End,
+            MoveDir::LineEnd,
+            help(HelpSection::Drawing, "home / end", "← / → edge", 50),
+            help(
+                HelpSection::Selection,
+                "shift+home / end",
+                "extend to ← / → edge",
+                20,
+            ),
+        ),
+        (
+            AppKeyCode::PageUp,
+            MoveDir::PageUp,
+            help(HelpSection::Drawing, "pgup / pgdn", "↑ / ↓ edge", 60),
+            help(
+                HelpSection::Selection,
+                "shift+pgup / pgdn",
+                "extend to ↑ / ↓ edge",
+                30,
+            ),
+        ),
+        (
+            AppKeyCode::PageDown,
+            MoveDir::PageDown,
+            help(HelpSection::Drawing, "pgup / pgdn", "↑ / ↓ edge", 60),
+            help(
+                HelpSection::Selection,
+                "shift+pgup / pgdn",
+                "extend to ↑ / ↓ edge",
+                30,
+            ),
+        ),
     ] {
         out.push(KeyBinding {
             trigger: KeyTrigger::Key(AppKey {
@@ -335,6 +500,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             }),
             context: BindingContext::Always,
             description: "extend selection",
+            help: extend_help,
         });
         out.push(KeyBinding {
             trigger: KeyTrigger::Key(AppKey {
@@ -347,6 +513,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             }),
             context: BindingContext::Always,
             description: "move cursor",
+            help: move_help,
         });
     }
 
@@ -359,6 +526,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         action: ActionSpec::Fixed(EditorAction::MoveDownLine),
         context: BindingContext::Always,
         description: "move to next row",
+        help: help(HelpSection::Drawing, "enter", "move down", 70),
     });
     out.push(KeyBinding {
         trigger: KeyTrigger::Key(AppKey {
@@ -368,6 +536,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         action: ActionSpec::Fixed(EditorAction::ClearSelection),
         context: BindingContext::Always,
         description: "clear selection",
+        help: None,
     });
 
     // While selecting with an anchor: char fills selection; BS/Del erases.
@@ -377,6 +546,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             action: ActionSpec::FillWithMatchedChar,
             context: BindingContext::WhenSelecting,
             description: "fill selection with character",
+            help: help(HelpSection::Selection, "<type>", "fill selection", 40),
         });
     }
     for mods in [none, shift] {
@@ -389,6 +559,12 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
                 action: ActionSpec::Fixed(EditorAction::FillSelectionOrCell(' ')),
                 context: BindingContext::WhenSelecting,
                 description: "erase selection",
+                help: help(
+                    HelpSection::Selection,
+                    "backspace / delete",
+                    "clear selection",
+                    50,
+                ),
             });
         }
     }
@@ -400,6 +576,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             action: ActionSpec::InsertMatchedChar,
             context: BindingContext::WhenNotSelecting,
             description: "insert character",
+            help: help(HelpSection::Drawing, "<type>", "draw character", 10),
         });
     }
     out.push(KeyBinding {
@@ -410,6 +587,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         action: ActionSpec::Fixed(EditorAction::Backspace),
         context: BindingContext::WhenNotSelecting,
         description: "delete previous character",
+        help: help(HelpSection::Drawing, "backspace", "erase backward", 20),
     });
     out.push(KeyBinding {
         trigger: KeyTrigger::Key(AppKey {
@@ -419,6 +597,7 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         action: ActionSpec::Fixed(EditorAction::Delete),
         context: BindingContext::WhenNotSelecting,
         description: "delete character at cursor",
+        help: help(HelpSection::Drawing, "delete", "erase at cursor", 30),
     });
 
     out
@@ -618,5 +797,22 @@ mod tests {
         let m = map();
         assert!(m.bindings().iter().all(|b| !b.description.is_empty()));
         assert!(!m.bindings().is_empty());
+    }
+
+    #[test]
+    fn help_entries_are_sorted_and_deduped() {
+        let rows = map().help_entries();
+        assert!(!rows.is_empty());
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.keys == "^T" && row.description == "flip corner / see-thru")
+                .count(),
+            1
+        );
+        assert!(rows.iter().any(|row| {
+            row.section == HelpSection::Clipboard
+                && row.keys == "^C"
+                && row.description == "copy → swatch"
+        }));
     }
 }

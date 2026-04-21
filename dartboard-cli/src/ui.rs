@@ -10,6 +10,7 @@ use crate::app::{App, FloatingSelection, HelpTab, Swatch, SWATCH_CAPACITY};
 use crate::emoji;
 use crate::theme;
 use dartboard_core::CellValue;
+use dartboard_editor::{HelpEntry as KeyMapHelpEntry, HelpSection as KeyMapHelpSection, KeyMap};
 use dartboard_tui::{
     CanvasStyle, CanvasWidget, CanvasWidgetState, FloatingView,
     SelectionShape as TuiSelectionShape, SelectionView,
@@ -25,9 +26,6 @@ const SWATCH_MARGIN_RIGHT: u16 = 1;
 const SWATCH_MARGIN_BOTTOM: u16 = 1;
 const PIN_UNPINNED: char = '📌';
 const PIN_PINNED: char = '📍';
-
-const HELP_SEPARATOR: &str = "  │  ";
-const HELP_SEPARATOR_COLS: u16 = 5;
 
 fn canvas_style() -> CanvasStyle {
     CanvasStyle {
@@ -139,7 +137,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_help {
         render_help(frame, area, app);
     } else {
-        app.help_tab_hits = [None; 2];
+        app.help_tab_hits.clear();
     }
 
     if app.emoji_picker_open {
@@ -517,10 +515,14 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
     Some(panel)
 }
 
+const HELP_TAB_COLS: usize = 3;
+const HELP_TAB_ROWS: u16 = 2;
+const HELP_TAB_GAP: u16 = 2;
+
 fn render_help(frame: &mut Frame, area: Rect, app: &mut App) {
-    app.help_tab_hits = [None; 2];
-    let width = 92u16.min(area.width.saturating_sub(4));
-    let height = 24u16.min(area.height.saturating_sub(2));
+    app.help_tab_hits.clear();
+    let width = 64u16.min(area.width.saturating_sub(4));
+    let height = 22u16.min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2 + area.x;
     let y = (area.height.saturating_sub(height)) / 2 + area.y;
     let popup = Rect::new(x, y, width, height);
@@ -547,32 +549,60 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    if inner.height < 3 || inner.width < 10 {
+    if inner.height < HELP_TAB_ROWS + 2 || inner.width < 10 {
         return;
     }
 
-    let tab_row = Rect::new(inner.x, inner.y, inner.width, 1);
-    let hits = render_help_tabs(frame.buffer_mut(), tab_row, app.help_tab);
-    app.help_tab_hits = hits;
+    let tabs_area = Rect::new(inner.x, inner.y, inner.width, HELP_TAB_ROWS);
+    app.help_tab_hits = render_help_tabs(frame.buffer_mut(), tabs_area, app.help_tab);
 
-    let content = Rect::new(
-        inner.x,
-        inner.y + 2,
-        inner.width,
-        inner.height.saturating_sub(2),
+    let (_, sep, _, _) = help_styles();
+    let divider_y = inner.y + HELP_TAB_ROWS;
+    let divider_area = Rect::new(inner.x, divider_y, inner.width, 1);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            sep,
+        ))),
+        divider_area,
     );
 
-    match app.help_tab {
-        HelpTab::Common => render_help_common(frame, content),
-        HelpTab::Advanced => render_help_advanced(frame, content),
-    }
+    let content_y = divider_y + 1;
+    let content = Rect::new(
+        inner.x,
+        content_y,
+        inner.width,
+        inner.height.saturating_sub(HELP_TAB_ROWS + 1),
+    );
+
+    render_help_section(frame, content, app.help_tab, &mut app.help_scroll);
 }
 
-fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) -> [Option<(HelpTab, Rect)>; 2] {
-    let tabs = [("common", HelpTab::Common), ("advanced", HelpTab::Advanced)];
-    let mut hits: [Option<(HelpTab, Rect)>; 2] = [None; 2];
-    let mut x = area.x + 1;
-    for (i, (label, tab)) in tabs.iter().enumerate() {
+fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) -> Vec<(HelpTab, Rect)> {
+    let mut hits: Vec<(HelpTab, Rect)> = Vec::with_capacity(HelpTab::ALL.len());
+    let tabs = HelpTab::ALL;
+
+    // Column widths: [ ] label (4 + label chars) — pad to widest in each column.
+    let mut col_widths = [0u16; HELP_TAB_COLS];
+    for (i, tab) in tabs.iter().enumerate() {
+        let col = i % HELP_TAB_COLS;
+        let cell = 4 + display_width(tab.label()) as u16;
+        if cell > col_widths[col] {
+            col_widths[col] = cell;
+        }
+    }
+
+    for (i, tab) in tabs.iter().enumerate() {
+        let col = i % HELP_TAB_COLS;
+        let row = (i / HELP_TAB_COLS) as u16;
+        if row >= area.height {
+            break;
+        }
+        let mut x = area.x + 1;
+        for w in col_widths.iter().take(col) {
+            x = x.saturating_add(*w).saturating_add(HELP_TAB_GAP);
+        }
+        let y = area.y + row;
         let is_active = *tab == active;
         let indicator = if is_active { "•" } else { " " };
         let cell_style = if is_active {
@@ -582,27 +612,17 @@ fn render_help_tabs(buf: &mut Buffer, area: Rect, active: HelpTab) -> [Option<(H
         } else {
             Style::default().fg(theme::MUTED)
         };
-        let text = format!("[{indicator}] {label}");
+        let text = format!("[{indicator}] {}", tab.label());
         let start_x = x;
         for ch in text.chars() {
             if x >= area.x + area.width {
                 break;
             }
-            buf[(x, area.y)].set_char(ch).set_style(cell_style);
+            buf[(x, y)].set_char(ch).set_style(cell_style);
             x += 1;
         }
         if x > start_x {
-            hits[i] = Some((*tab, Rect::new(start_x, area.y, x - start_x, 1)));
-        }
-        // spacing between tabs
-        for _ in 0..2 {
-            if x >= area.x + area.width {
-                break;
-            }
-            buf[(x, area.y)]
-                .set_char(' ')
-                .set_style(Style::default().fg(theme::MUTED));
-            x += 1;
+            hits.push((*tab, Rect::new(start_x, y, x - start_x, 1)));
         }
     }
     hits
@@ -618,144 +638,100 @@ fn help_styles() -> (Style, Style, Style, Style) {
     (heading, sep, key, desc)
 }
 
-fn render_help_common(frame: &mut Frame, area: Rect) {
-    let (heading, sep, key, desc) = help_styles();
-    let col_width = area.width.saturating_sub(HELP_SEPARATOR_COLS) / 2;
-    let right_col_width = area.width.saturating_sub(col_width + HELP_SEPARATOR_COLS);
-
-    let drawing: Vec<(&str, &str)> = vec![
-        ("<type>", "draw character"),
-        ("backspace", "erase backward"),
-        ("delete", "erase at cursor"),
-        ("arrows", "move cursor"),
-        ("alt+arrows / ^⇧+arrows", "pan viewport"),
-        ("home / end", "left / right edge"),
-        ("pgup / pgdn", "top / bottom edge"),
-        ("enter", "move down"),
-    ];
-    let selection: Vec<(&str, &str)> = vec![
-        ("shift+arrows", "create/extend selection"),
-        ("click+drag", "block select with mouse"),
-        ("right-drag", "pan viewport"),
-        ("<type>", "fill selection"),
-        ("bksp / del", "clear selection"),
-        ("esc / arrow", "cancel selection"),
-        ("alt+click", "extend selection"),
-        ("^T", "flip corner / see-thru"),
-    ];
-    let clipboard: Vec<(&str, &str)> = vec![
-        ("^X", "cut → swatch"),
-        ("^C", "copy → swatch"),
-        ("^V", "paste / stamp"),
-        ("alt+c", "os copy"),
-        ("^a ^s ^d ^f ^g", "lift swatch 1..5"),
-        ("📌", "pin"),
-    ];
-    let session: Vec<(&str, &str)> = vec![
-        ("^Z ^R", "undo / redo"),
-        ("^P", "help toggle"),
-        ("^Q", "quit"),
-    ];
-
-    let top_rows = drawing.len().max(selection.len());
-    let bottom_rows = clipboard.len().max(session.len());
-
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(top_rows + bottom_rows + 4);
-    lines.push(two_col_line(
-        section_title_line("drawing", col_width as usize, heading),
-        section_title_line("selection", right_col_width as usize, heading),
-    ));
-    lines.push(two_col_line(
-        section_divider_line(col_width as usize, sep),
-        section_divider_line(right_col_width as usize, sep),
-    ));
-    for i in 0..top_rows {
-        let left = match drawing.get(i) {
-            Some((k, d)) => help_entry_line(k, d, col_width as usize, key, desc),
-            None => blank_line(col_width as usize),
-        };
-        let right = match selection.get(i) {
-            Some((k, d)) => help_entry_line(k, d, right_col_width as usize, key, desc),
-            None => blank_line(right_col_width as usize),
-        };
-        lines.push(two_col_line(left, right));
-    }
-    lines.push(two_col_line(
-        blank_line(col_width as usize),
-        blank_line(right_col_width as usize),
-    ));
-    lines.push(two_col_line(
-        section_title_line("clipboard", col_width as usize, heading),
-        section_title_line("session", right_col_width as usize, heading),
-    ));
-    lines.push(two_col_line(
-        section_divider_line(col_width as usize, sep),
-        section_divider_line(right_col_width as usize, sep),
-    ));
-    for i in 0..bottom_rows {
-        let left = match clipboard.get(i) {
-            Some((k, d)) => help_entry_line(k, d, col_width as usize, key, desc),
-            None => blank_line(col_width as usize),
-        };
-        let right = match session.get(i) {
-            Some((k, d)) => help_entry_line(k, d, right_col_width as usize, key, desc),
-            None => blank_line(right_col_width as usize),
-        };
-        lines.push(two_col_line(left, right));
-    }
-
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+fn keymap_help_entries() -> Vec<KeyMapHelpEntry> {
+    KeyMap::default_standalone().help_entries()
 }
 
-fn render_help_advanced(frame: &mut Frame, area: Rect) {
-    let (heading, sep, key, desc) = help_styles();
-    let col_width = area.width.saturating_sub(HELP_SEPARATOR_COLS) / 2;
-    let right_col_width = area.width.saturating_sub(col_width + HELP_SEPARATOR_COLS);
+fn keymap_help_rows(
+    entries: &[KeyMapHelpEntry],
+    section: KeyMapHelpSection,
+) -> Vec<(&'static str, &'static str)> {
+    entries
+        .iter()
+        .filter(|entry| entry.section == section)
+        .map(|entry| (entry.keys, entry.description))
+        .collect()
+}
 
-    let transform: Vec<(&str, &str)> = vec![
-        ("^H ^J ^K ^L", "push left/down/up/right"),
-        ("^Y ^U ^I ^O", "pull left/down/up/right"),
-        ("^B", "draw selection border"),
-        ("^space", "fill selection or cell"),
-    ];
+fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
+    let entries = keymap_help_entries();
+    match tab {
+        HelpTab::Guide => Vec::new(),
+        HelpTab::Drawing => keymap_help_rows(&entries, KeyMapHelpSection::Drawing),
+        HelpTab::Selection => {
+            let mut rows = keymap_help_rows(&entries, KeyMapHelpSection::Selection);
+            rows.extend([
+                ("click+drag", "block select with mouse"),
+                ("right-drag", "pan viewport"),
+                ("alt+click", "extend selection"),
+                ("esc / move", "cancel selection"),
+            ]);
+            rows
+        }
+        HelpTab::Clipboard => {
+            let mut rows = keymap_help_rows(&entries, KeyMapHelpSection::Clipboard);
+            rows.push(("📌", "pin"));
+            rows
+        }
+        HelpTab::Transform => keymap_help_rows(&entries, KeyMapHelpSection::Transform),
+        HelpTab::Session => vec![
+            ("^Z / ^R", "undo / redo"),
+            ("^P", "help toggle"),
+            ("^Q", "quit"),
+        ],
+    }
+}
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(two_col_line(
-        section_title_line("transform", col_width as usize, heading),
-        blank_line(right_col_width as usize),
-    ));
-    lines.push(two_col_line(
-        section_divider_line(col_width as usize, sep),
-        blank_line(right_col_width as usize),
-    ));
-    for (k, d) in transform.iter() {
-        lines.push(two_col_line(
-            help_entry_line(k, d, col_width as usize, key, desc),
-            blank_line(right_col_width as usize),
-        ));
+const GUIDE_PROSE: &[&str] = &[
+    "Move the caret with ←↑↓→ and type to draw.",
+    "",
+    "Hold shift with ←↑↓→ (or click + drag) to select a region.",
+    "Type to fill the selection. Use ^X / ^C / ^V to cut / copy",
+    "/ paste into one of five swatches. Click a swatch to use it",
+    "as a brush.",
+    "",
+    "^Q quits the artboard.  ^] opens the emoji / glyph picker.",
+    "",
+    "^P toggles this help. Tab or ←/→ switches between these",
+    "tabs; ↑/↓ (or j/k) scrolls the content of the current help",
+    "tab.",
+    "",
+    "The other help tabs list the keys by category.",
+];
+
+fn build_guide_lines(desc: Style) -> Vec<Line<'static>> {
+    GUIDE_PROSE
+        .iter()
+        .map(|prose| Line::from(Span::styled(format!(" {prose}"), desc)))
+        .collect()
+}
+
+fn render_help_section(frame: &mut Frame, area: Rect, tab: HelpTab, scroll: &mut u16) {
+    let (_, _, key, desc) = help_styles();
+    let width = area.width as usize;
+
+    let lines: Vec<Line<'static>> = if tab == HelpTab::Guide {
+        build_guide_lines(desc)
+    } else {
+        let rows = help_rows_for_tab(tab);
+        let widest_key = rows
+            .iter()
+            .map(|(k, _)| display_width(k))
+            .max()
+            .unwrap_or(0);
+        let key_width = widest_key.min(width.saturating_sub(2));
+        rows.iter()
+            .map(|(k, d)| help_entry_line_with_key_width(k, d, width, key_width, key, desc))
+            .collect()
+    };
+
+    let visible = area.height as usize;
+    let max_scroll = lines.len().saturating_sub(visible) as u16;
+    if *scroll > max_scroll {
+        *scroll = max_scroll;
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
-}
-
-fn section_title_line(title: &str, width: usize, hs: Style) -> Line<'static> {
-    if width == 0 {
-        return Line::default();
-    }
-
-    let label_width = width.saturating_sub(2);
-    let label = truncate_display(title, label_width);
-    let padded = pad_right_display(&label, label_width);
-    Line::from(vec![Span::styled(format!(" {padded} "), hs)])
-}
-
-fn section_divider_line(width: usize, sep: Style) -> Line<'static> {
-    Line::from(vec![Span::styled("─".repeat(width), sep)])
-}
-
-fn help_entry_line(k: &str, d: &str, width: usize, ks: Style, ds: Style) -> Line<'static> {
-    let key_width = width.min(if width < 22 { 10 } else { 14 });
-    help_entry_line_with_key_width(k, d, width, key_width, ks, ds)
+    frame.render_widget(Paragraph::new(Text::from(lines)).scroll((*scroll, 0)), area);
 }
 
 fn help_entry_line_with_key_width(
@@ -779,20 +755,6 @@ fn help_entry_line_with_key_width(
     let desc_padded = pad_right_display(&desc_label, desc_width);
 
     Line::from(vec![Span::styled(left, ks), Span::styled(desc_padded, ds)])
-}
-
-fn blank_line(width: usize) -> Line<'static> {
-    Line::from(" ".repeat(width))
-}
-
-fn two_col_line(left: Line<'static>, right: Line<'static>) -> Line<'static> {
-    let mut spans = left.spans;
-    spans.push(Span::styled(
-        HELP_SEPARATOR,
-        Style::default().fg(theme::MUTED_GREATER),
-    ));
-    spans.extend(right.spans);
-    Line::from(spans)
 }
 
 fn display_width(s: &str) -> usize {
