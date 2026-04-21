@@ -1,258 +1,122 @@
 # KeyMap Then More Reuse Refactoring
 
-This note captures the current state of the reuse work and the next refactoring direction after recognizing that `KeyMap` / `EditorAction` is now the right organizing seam.
+Status note: references in older notes to the standalone `dartboard` crate/path now mean `dartboard-cli` in this workspace. The binary is still named `dartboard`, but the standalone host code lives under `dartboard-cli/`.
 
-It is meant to complement, not replace, [IMPROVE-REUSABILITY.md](./IMPROVE-REUSABILITY.md).
+This note complements [IMPROVE-REUSABILITY.md](./IMPROVE-REUSABILITY.md) and now reflects the current post-refactor state rather than the original pre-implementation plan.
 
-## Current state
+## Done
 
-`dartboard` has already gained several useful lower layers:
+### `EditorAction` exists
+- `EditorAction` is now the editor-facing command surface in `dartboard-editor`.
+- The editor executes actions instead of directly hard-coding all behavior behind raw keys.
 
-- `dartboard-tui` for reusable canvas rendering
-- `dartboard-editor` for crossterm-free editor/session types and editor behavior
-- public host-neutral input types:
-  - `AppIntent`
-  - `AppKey` / `AppKeyCode`
-  - `AppPointerEvent` / `AppPointerKind`
-- a minimal `HostEffect` surface
+### `KeyMap` exists
+- A default `KeyMap` lives in `dartboard-editor::keymap`.
+- It maps `AppKey` values to abstract editor actions.
+- It already carries binding descriptions as metadata.
 
-The current editor/input split looks like this:
+### Standalone flow is now key -> action -> editor execution
+- `dartboard-cli` resolves keys through `KeyMap`.
+- The result is passed to `handle_editor_action(...)`.
+- This is the core seam the note originally argued for.
 
-- `dartboard-editor` owns the editor session model and many pure editor operations
-- `dartboard::app::App` still owns standalone shell behavior, transport composition, undo/op submission, host-effect realization, help/picker UI, and hit-testing
+### The split is materially better than before
+- `dartboard-editor` owns the reusable editor session model and many editor operations.
+- `dartboard-cli` still owns shell behavior, transport composition, undo/op submission, host-effect realization, help/picker UI, and hit-testing.
 
-The most recent extraction moved the non-shell keyboard dispatch path into `dartboard-editor`.
+Relevant code:
+- input surface: [dartboard-editor/src/lib.rs](/Users/mclark/p/my/dartboard/dartboard-editor/src/lib.rs:130)
+- `EditorAction`: [dartboard-editor/src/lib.rs](/Users/mclark/p/my/dartboard/dartboard-editor/src/lib.rs:161)
+- current key dispatch entrypoints: [dartboard-editor/src/lib.rs](/Users/mclark/p/my/dartboard/dartboard-editor/src/lib.rs:1297)
+- keymap definition: [dartboard-editor/src/keymap.rs](/Users/mclark/p/my/dartboard/dartboard-editor/src/keymap.rs:42)
+- standalone key policy and action execution: [dartboard-cli/src/app.rs](/Users/mclark/p/my/dartboard/dartboard-cli/src/app.rs:1166)
 
-Relevant current code:
+## Next
 
-- input surface: [dartboard-editor/src/lib.rs](/Users/mclark/p/my/dartboard/dartboard-editor/src/lib.rs:80)
-- current key dispatch: [dartboard-editor/src/lib.rs](/Users/mclark/p/my/dartboard/dartboard-editor/src/lib.rs:1180)
-- remaining standalone key policy and pointer routing: [dartboard/src/app.rs](/Users/mclark/p/my/dartboard/dartboard/src/app.rs:1303)
+### Generate help from keymap metadata
+This is the largest clearly pending item from the original plan.
 
-So the architecture is better than before, but it still has an important weakness:
+Current state:
+- `KeyMap` has binding descriptions
+- `dartboard-cli` help is still manually maintained
 
-- editor behavior is now reusable
-- key bindings are still hardcoded inside the editor layer
+Target:
+- default help rendered from keymap metadata
+- standalone help stops duplicating binding knowledge by hand
 
-That makes further reuse work awkward, because the next extraction steps would otherwise keep following a "raw keys first, behavior second" shape.
+### Continue the reuse refactor using `EditorAction` as the seam
+The next extraction work should follow the same pattern:
+- identify reusable behavior
+- express it as actions/effects/state transitions in `dartboard-editor`
+- keep shell-only policy in `dartboard-cli`
 
-## Why introduce `EditorAction` and `KeyMap` now
+The most promising next areas are:
+- more pointer/editor dispatch extraction where it is not tightly coupled to shell hit regions
+- broader editor-effect vs host-effect separation
+- further narrowing of `dartboard-cli::app::App`
 
-This is the right point to introduce them because the code has just reached a transitional state:
+### Keep `KeyMap` as data, not policy glue
+The right direction remains:
+- `KeyMap` owns bindings and binding metadata
+- `dartboard-editor` owns editor behavior
+- `dartboard-cli` owns standalone shell policy
 
-- the editor layer is large enough to deserve a stable abstract command surface
-- the host-neutral input types already exist
-- the default standalone bindings are now concentrated enough to extract cleanly
+If keymap complexity grows, likely future work includes:
+- alternate layouts
+- user overrides
+- serialized keymap configuration
 
-Without this step, more refactoring would continue to bake default keyboard choices into reusable editor code.
+## Deferred
 
-With this step, later refactors can follow a cleaner pattern:
+### Giant all-at-once input refactor
+Still not worth doing in one pass:
+- keyboard keymap changes
+- pointer mapping
+- picker/help shell routing
+- transport/session extraction
+- host-effect redesign
 
-1. host input arrives as `AppIntent`
-2. a keymap turns raw keys into abstract actions
-3. the editor executes actions
-4. the host realizes effects and handles shell-only concerns
+Keyboard was the cleanest first seam. That was the right call. Pointer and shell routing are still more contextual.
 
-That is a better fit for:
+### Fully generalized help/binding UX
+The immediate target is generated help from current keymap metadata, not a complete customization system.
 
-- customizable key bindings
-- automatically generated keyboard help
-- alternate hosts like `late-sh`
-- future default-layout changes without editor rewrites
+These can wait:
+- per-host help layouts
+- keybinding override UX
+- binding serialization/import/export
 
-## Proposed separation
+## Current Architecture
 
 ### `dartboard-editor`
-
-Should own:
-
+Owns:
 - `EditorSession`
 - editor state transitions
 - canvas-editing behavior
+- `EditorAction`
+- `KeyMap`
 - editor-facing effect emission
-- abstract actions like `EditorAction`
 
-Should not own:
+Does not fully own yet:
+- standalone-specific floating overrides that depend on local undo grouping
+- shell hit-testing
+- undo/redo orchestration
+- host-effect realization
 
-- default keyboard layout choices
-- help text tied to concrete bindings
-- crossterm parsing
-- standalone picker/help/window policy
-
-### `KeyMap`
-
-Should own:
-
-- mapping from `AppKey` to abstract actions
-- binding metadata for help text
-- the default standalone key layout
-- eventually user overrides / alternate layouts
-
-Should not own:
-
-- editor state mutation directly
-- transport logic
-- terminal/crossterm-specific event parsing
-
-### `dartboard::app::App`
-
-Should continue to own:
-
+### `dartboard-cli`
+Still owns:
 - crossterm event handling via adapter helpers
 - standalone-only shell shortcuts and UI policy
-- floating-specific behavior that still depends on local undo grouping
-- pointer hit-testing for shell zones like help tabs, swatches, picker regions
+- floating-specific behavior tied to local undo grouping
+- pointer hit-testing for help tabs, swatches, and picker regions
 - undo/redo stack ownership and op submission
 - transport/session mirror composition
 - host-effect realization
 
-## Proposed core abstraction
+## Immediate Next Task
 
-Introduce an `EditorAction` enum as the editor-facing command surface.
+The clearest next implementation step is:
 
-Likely categories:
-
-- movement actions
-- selection actions
-- clipboard/swatch actions
-- fill/border/edit actions
-- viewport pan actions
-- floating actions
-- text insertion / paste actions
-
-Examples:
-
-- `MoveLeft`
-- `MoveRight`
-- `MoveToLineStart`
-- `BeginSelection`
-- `ClearSelection`
-- `CopySelection`
-- `CutSelection`
-- `PastePrimarySwatch`
-- `SmartFill`
-- `DrawBorder`
-- `InsertChar(char)`
-- `PasteText(String)`
-- `TransposeSelectionCorner`
-- `ActivateSwatch(usize)`
-- `ToggleFloatingTransparency`
-
-This should replace the current "execute raw key directly" entrypoint in `dartboard-editor`.
-
-Instead of:
-
-- `handle_editor_key_press(editor, canvas, key, color)`
-
-the editor layer should move toward:
-
-- `handle_editor_action(editor, canvas, action, color)` or similar
-
-## Proposed keymap abstraction
-
-After `EditorAction` exists, add a `KeyMap` layer above it.
-
-Suggested shape:
-
-- `KeyBinding`
-- `KeyMap`
-- `BindingContext` if needed later
-
-The initial version can be simple:
-
-- one default keymap
-- map `AppKey` to one or more `EditorAction`s
-- include enough metadata for help text rendering
-
-Possible placement:
-
-- `dartboard-keymap`
-- or `dartboard-editor::keymap`
-
-The package split is less important than the conceptual split.
-
-If the code stays small, starting inside `dartboard-editor` as a `keymap` module is reasonable. If it grows into presets, overrides, serialization, and help metadata, a dedicated crate will make more sense.
-
-## Help generation goal
-
-The desired direction is:
-
-- default help should be rendered from binding data, not maintained as separate prose tables
-- standalone `dartboard` help UI should consume keymap metadata
-- alternate hosts should be free to render their own help or ignore it
-
-This does not require solving every documentation/UI issue up front. It only requires that the binding data become explicit and queryable.
-
-## Recommended order of work
-
-### 1. Introduce `EditorAction`
-
-Refactor the current key-driven editor dispatch into abstract actions.
-
-Goal:
-
-- the editor executes actions, not keys
-
-This is the key prerequisite for the rest.
-
-### 2. Add default `KeyMap`
-
-Move the current hardcoded keyboard binding choices out of the editor behavior path and into a default binding table.
-
-Goal:
-
-- current standalone behavior remains the same
-- the binding decisions become data
-
-### 3. Update standalone `App` to use keymap -> action -> editor execution
-
-Goal:
-
-- `App` stops knowing the default editor keyboard layout directly
-- `App` still keeps shell-only shortcuts and policies where appropriate
-
-### 4. Generate keyboard help from keymap metadata
-
-Goal:
-
-- help stops duplicating binding knowledge manually
-
-### 5. Continue the remaining reuse refactors using `EditorAction` as the pattern
-
-After that, continue with:
-
-- more pointer/editor dispatch extraction where appropriate
-- better editor-effect vs host-effect separation
-- session mirror extraction around transport/client state
-
-## What should wait
-
-Do not try to solve all input abstraction at once.
-
-Specifically, do not combine these into one giant refactor:
-
-- keyboard keymap
-- pointer mapping
-- picker/help shell routing
-- transport/session mirror extraction
-- host-effect redesign
-
-Keyboard is the cleanest next seam. Mouse/pointer routing is more contextual because some of it depends on UI hit regions and standalone undo grouping.
-
-So the intended next move is:
-
-- keyboard first
-- pointer later
-
-## Immediate next task
-
-The next implementation task should be:
-
-1. add `EditorAction`
-2. refactor the current editor key-dispatch code to produce/execute actions
-3. only then introduce `KeyMap`
-
-That order keeps the design honest:
-
-- `KeyMap` should target abstract actions
-- not another raw-key dispatcher hidden in a different place
+1. generate `dartboard-cli` keyboard help from `KeyMap` metadata
+2. remove duplicated manual binding tables
+3. then continue the remaining reuse refactors with the new seam in place
