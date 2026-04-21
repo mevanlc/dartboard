@@ -647,6 +647,20 @@ impl EditorSession {
         }
     }
 
+    pub fn clear_swatch(&mut self, idx: usize) {
+        if idx >= SWATCH_CAPACITY {
+            return;
+        }
+        self.swatches[idx] = None;
+        if self
+            .floating
+            .as_ref()
+            .is_some_and(|floating| floating.source_index == Some(idx))
+        {
+            dismiss_floating(self);
+        }
+    }
+
     pub fn activate_swatch(&mut self, idx: usize) -> SwatchActivation {
         if idx >= SWATCH_CAPACITY {
             return SwatchActivation::Ignored;
@@ -1961,6 +1975,33 @@ mod tests {
         );
         assert!(session.floating.as_ref().unwrap().transparent);
         assert_eq!(session.floating_brush_width(), 1);
+    }
+
+    #[test]
+    fn clearing_swatch_empties_slot() {
+        let clipboard = Clipboard::new(1, 1, vec![Some(CellValue::Narrow('X'))]);
+        let mut session = EditorSession::default();
+        session.push_swatch(clipboard);
+
+        session.clear_swatch(0);
+
+        assert!(session.swatches[0].is_none());
+    }
+
+    #[test]
+    fn clearing_active_swatch_dismisses_floating() {
+        let clipboard = Clipboard::new(1, 1, vec![Some(CellValue::Narrow('X'))]);
+        let mut session = EditorSession::default();
+        session.push_swatch(clipboard);
+        assert_eq!(
+            session.activate_swatch(0),
+            SwatchActivation::ActivatedFloating
+        );
+
+        session.clear_swatch(0);
+
+        assert!(session.swatches[0].is_none());
+        assert!(session.floating.is_none());
     }
 
     #[test]

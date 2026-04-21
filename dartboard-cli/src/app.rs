@@ -727,6 +727,10 @@ impl App {
         self.with_editor_session_mut(|editor, _| editor.toggle_pin(idx));
     }
 
+    pub fn clear_swatch(&mut self, idx: usize) {
+        self.with_editor_session_mut(|editor, _| editor.clear_swatch(idx));
+    }
+
     pub fn activate_swatch(&mut self, idx: usize) {
         let activation = self.with_editor_session_mut(|editor, _| editor.activate_swatch(idx));
         if activation == SwatchActivation::ActivatedFloating {
