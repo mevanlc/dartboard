@@ -1,5 +1,4 @@
 pub mod catalog;
-pub mod nerd_fonts;
 pub mod picker;
 pub mod ring_cursor;
 

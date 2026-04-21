@@ -1,51 +1,49 @@
-use super::nerd_fonts;
+use dartboard_picker_core::{sources, SectionSpec};
+pub use dartboard_picker_core::{IconCatalogData, IconEntry};
 
-#[derive(Clone)]
-pub struct IconEntry {
-    pub icon: String,
-    pub name: String,
-    pub name_lower: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconPickerTab {
+    Emoji,
+    Unicode,
+    NerdFont,
 }
 
-pub enum SectionEntries<'a> {
-    Full(&'a [IconEntry]),
-    Filtered(Vec<&'a IconEntry>),
-}
-
-impl<'a> SectionEntries<'a> {
-    pub fn len(&self) -> usize {
+impl IconPickerTab {
+    pub fn index(self) -> usize {
         match self {
-            Self::Full(s) => s.len(),
-            Self::Filtered(v) => v.len(),
+            Self::Emoji => 0,
+            Self::Unicode => 1,
+            Self::NerdFont => 2,
         }
     }
-
-    pub fn get(&self, i: usize) -> Option<&'a IconEntry> {
-        match self {
-            Self::Full(s) => s.get(i),
-            Self::Filtered(v) => v.get(i).copied(),
-        }
-    }
-}
-
-pub struct SectionView<'a> {
-    pub title: &'static str,
-    pub entries: SectionEntries<'a>,
-}
-
-pub struct IconCatalogData {
-    emoji_common: Vec<IconEntry>,
-    emoji_all: Vec<IconEntry>,
-    nerd_common: Vec<IconEntry>,
-    nerd_all: Vec<IconEntry>,
-    unicode_box: Vec<IconEntry>,
-    unicode_common: Vec<IconEntry>,
-    unicode_all: Vec<IconEntry>,
 }
 
 const COMMON_EMOJI: &[&str] = &[
-    "🌱", "🔧", "⚡", "⭐", "✨", "🔥", "💎", "🤖", "🎯", "🚀", "📁", "🌿", "📊", "💰", "⏱", "🎨",
-    "💡", "🔒",
+    "👍",
+    "👎",
+    "🙏",
+    "🙌",
+    "🙋",
+    "🐐",
+    "😂",
+    "🫡",
+    "👀",
+    "💀",
+    "🎉",
+    "🤝",
+    "❤\u{fe0f}",
+    "✅",
+    "🔥",
+    "⚡",
+    "🚀",
+    "🤔",
+    "🫠",
+    "🌱",
+    "🤖",
+    "🔧",
+    "💎",
+    "⭐",
+    "🎯",
 ];
 
 const COMMON_NERD_NAMES: &[&str] = &[
@@ -78,196 +76,25 @@ const COMMON_UNICODE: &[(&str, &str)] = &[
     ("✗", "Ballot X"),
 ];
 
-impl IconCatalogData {
-    pub fn load() -> Self {
-        let emoji_common = build_emoji_common();
-        let emoji_all = build_emoji_all();
-        let nerd_all_raw = nerd_fonts::load();
-        let (nerd_common, nerd_all) = build_nerd_sections(&nerd_all_raw);
-        let unicode_box = build_unicode_box_drawing();
-        let unicode_common = build_unicode_common();
-        let unicode_all = build_unicode_all();
+/// Build the dartboard-cli icon catalog: three tabs (Emoji, Unicode, NerdFont)
+/// with a "common" curated section and a full section in each. Tab order must
+/// match [`IconPickerTab::index`].
+pub fn load_catalog() -> IconCatalogData {
+    let emoji_tab = vec![
+        SectionSpec::new("common emoji", sources::emoji_pick(COMMON_EMOJI)),
+        SectionSpec::new("all emoji", sources::emoji_all()),
+    ];
 
-        Self {
-            emoji_common,
-            emoji_all,
-            nerd_common,
-            nerd_all,
-            unicode_box,
-            unicode_common,
-            unicode_all,
-        }
-    }
+    let unicode_tab = vec![
+        SectionSpec::new("box drawing", sources::unicode_range(0x2500..=0x259F)),
+        SectionSpec::new("common", sources::unicode_pick(COMMON_UNICODE)),
+        SectionSpec::new("all unicode", sources::unicode_all()),
+    ];
 
-    pub fn sections(&self, tab: IconPickerTab, query: &str) -> Vec<SectionView<'_>> {
-        let query_lower = query.to_lowercase();
-        match tab {
-            IconPickerTab::Emoji => filter_two_sections(
-                "common emoji",
-                &self.emoji_common,
-                "all emoji",
-                &self.emoji_all,
-                &query_lower,
-            ),
-            IconPickerTab::NerdFont => filter_two_sections(
-                "common",
-                &self.nerd_common,
-                "all nerd font",
-                &self.nerd_all,
-                &query_lower,
-            ),
-            IconPickerTab::Unicode => filter_sections(
-                &[
-                    ("box drawing", self.unicode_box.as_slice()),
-                    ("common", self.unicode_common.as_slice()),
-                    ("all unicode", self.unicode_all.as_slice()),
-                ],
-                &query_lower,
-            ),
-        }
-    }
-}
+    let nerd_tab = vec![
+        SectionSpec::new("common", sources::nerd_pick(COMMON_NERD_NAMES)),
+        SectionSpec::new("all nerd font", sources::nerd_all()),
+    ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IconPickerTab {
-    Emoji,
-    NerdFont,
-    Unicode,
-}
-
-fn make_entry(icon: String, name: String) -> IconEntry {
-    let name_lower = name.to_lowercase();
-    IconEntry {
-        icon,
-        name,
-        name_lower,
-    }
-}
-
-fn build_emoji_common() -> Vec<IconEntry> {
-    COMMON_EMOJI
-        .iter()
-        .filter_map(|s| {
-            let emoji = emojis::get(s)?;
-            if emoji.as_str().chars().count() != 1 {
-                return None;
-            }
-            Some(make_entry(
-                emoji.as_str().to_string(),
-                emoji.name().to_string(),
-            ))
-        })
-        .collect()
-}
-
-fn build_emoji_all() -> Vec<IconEntry> {
-    emojis::iter()
-        .filter(|emoji| emoji.as_str().chars().count() == 1)
-        .map(|emoji| make_entry(emoji.as_str().to_string(), emoji.name().to_string()))
-        .collect()
-}
-
-fn build_nerd_sections(all: &[nerd_fonts::NerdFontGlyph]) -> (Vec<IconEntry>, Vec<IconEntry>) {
-    let common: Vec<IconEntry> = COMMON_NERD_NAMES
-        .iter()
-        .filter_map(|prefix| {
-            all.iter()
-                .find(|g| g.name == *prefix)
-                .map(|g| make_entry(g.icon.clone(), g.name.clone()))
-        })
-        .collect();
-
-    let all_entries: Vec<IconEntry> = all
-        .iter()
-        .map(|g| make_entry(g.icon.clone(), g.name.clone()))
-        .collect();
-
-    (common, all_entries)
-}
-
-fn build_unicode_box_drawing() -> Vec<IconEntry> {
-    // U+2500..=U+257F is the "Box Drawing" Unicode block. Some terminals
-    // also include a few glyphs from the adjacent Block Elements range
-    // (U+2580..=U+259F) for shading/partial blocks that are commonly used
-    // alongside the box drawing chars.
-    let mut entries = Vec::new();
-    for code in 0x2500u32..=0x259F {
-        if let Some(ch) = char::from_u32(code) {
-            if let Some(name) = unicode_names2::name(ch) {
-                let name_str = name.to_string();
-                if name_str.starts_with('<') {
-                    continue;
-                }
-                entries.push(make_entry(ch.to_string(), name_str.to_lowercase()));
-            }
-        }
-    }
-    entries
-}
-
-fn build_unicode_common() -> Vec<IconEntry> {
-    COMMON_UNICODE
-        .iter()
-        .map(|(icon, name)| make_entry(icon.to_string(), name.to_lowercase()))
-        .collect()
-}
-
-fn build_unicode_all() -> Vec<IconEntry> {
-    let mut entries = Vec::new();
-    for code in 0u32..=0x10FFFF {
-        if (0xD800..=0xDFFF).contains(&code) {
-            continue;
-        }
-        if let Some(ch) = char::from_u32(code) {
-            if let Some(name) = unicode_names2::name(ch) {
-                let name_str = name.to_string();
-                if name_str.starts_with('<') {
-                    continue;
-                }
-                entries.push(make_entry(ch.to_string(), name_str.to_lowercase()));
-            }
-        }
-    }
-    entries
-}
-
-fn filter_two_sections<'a>(
-    common_title: &'static str,
-    common: &'a [IconEntry],
-    all_title: &'static str,
-    all: &'a [IconEntry],
-    query: &str,
-) -> Vec<SectionView<'a>> {
-    filter_sections(&[(common_title, common), (all_title, all)], query)
-}
-
-fn filter_sections<'a>(
-    sections: &[(&'static str, &'a [IconEntry])],
-    query: &str,
-) -> Vec<SectionView<'a>> {
-    let mut out = Vec::new();
-    for (title, source) in sections {
-        if query.is_empty() {
-            if source.is_empty() {
-                continue;
-            }
-            out.push(SectionView {
-                title,
-                entries: SectionEntries::Full(source),
-            });
-        } else {
-            let filtered: Vec<&IconEntry> = source
-                .iter()
-                .filter(|e| e.name_lower.contains(query))
-                .collect();
-            if filtered.is_empty() {
-                continue;
-            }
-            out.push(SectionView {
-                title,
-                entries: SectionEntries::Filtered(filtered),
-            });
-        }
-    }
-    out
+    IconCatalogData::new(vec![emoji_tab, unicode_tab, nerd_tab])
 }

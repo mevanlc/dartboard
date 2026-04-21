@@ -247,6 +247,7 @@ dependencies = [
  "dartboard-client-ws",
  "dartboard-core",
  "dartboard-editor",
+ "dartboard-picker-core",
  "dartboard-server",
  "dartboard-tui",
  "emojis",
@@ -290,6 +291,15 @@ name = "dartboard-local"
 version = "0.1.0"
 dependencies = [
  "dartboard-core",
+]
+
+[[package]]
+name = "dartboard-picker-core"
+version = "0.1.0"
+dependencies = [
+ "emojis",
+ "serde_json",
+ "unicode_names2",
 ]
 
 [[package]]

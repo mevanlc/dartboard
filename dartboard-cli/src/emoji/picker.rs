@@ -1,8 +1,11 @@
 use super::{
-    catalog::{IconCatalogData, IconEntry, IconPickerTab, SectionView},
+    catalog::{IconCatalogData, IconEntry, IconPickerTab},
     EmojiPickerState,
 };
 use crate::theme;
+pub use dartboard_picker_core::{
+    entry_at_selectable, flat_len, flat_to_selectable, selectable_count, selectable_to_flat,
+};
 use ratatui::{
     layout::{Constraint, Direction, Flex, Layout, Rect},
     style::{Modifier, Style},
@@ -10,62 +13,6 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
-
-pub fn selectable_count(sections: &[SectionView<'_>]) -> usize {
-    sections.iter().map(|s| s.entries.len()).sum()
-}
-
-pub fn flat_len(sections: &[SectionView<'_>]) -> usize {
-    sections.iter().map(|s| s.entries.len() + 1).sum()
-}
-
-pub fn selectable_to_flat(sections: &[SectionView<'_>], sel: usize) -> Option<usize> {
-    let mut flat = 0;
-    let mut remaining = sel;
-    for s in sections {
-        flat += 1;
-        let len = s.entries.len();
-        if remaining < len {
-            return Some(flat + remaining);
-        }
-        remaining -= len;
-        flat += len;
-    }
-    None
-}
-
-pub fn flat_to_selectable(sections: &[SectionView<'_>], flat_idx: usize) -> Option<usize> {
-    let mut flat = 0;
-    let mut selectable = 0;
-    for s in sections {
-        if flat_idx == flat {
-            return None;
-        }
-        flat += 1;
-        let len = s.entries.len();
-        if flat_idx < flat + len {
-            return Some(selectable + (flat_idx - flat));
-        }
-        flat += len;
-        selectable += len;
-    }
-    None
-}
-
-pub fn entry_at_selectable<'a>(
-    sections: &'a [SectionView<'a>],
-    sel: usize,
-) -> Option<&'a IconEntry> {
-    let mut remaining = sel;
-    for s in sections {
-        let len = s.entries.len();
-        if remaining < len {
-            return s.entries.get(remaining);
-        }
-        remaining -= len;
-    }
-    None
-}
 
 pub fn render(f: &mut Frame, area: Rect, state: &EmojiPickerState, catalog: &IconCatalogData) {
     let height = ((area.height as u32 * 70) / 100) as u16;
@@ -239,7 +186,7 @@ fn render_icon_list(
     catalog: &IconCatalogData,
 ) {
     let tab = *state.tab.current();
-    let sections = catalog.sections(tab, &state.search_query);
+    let sections = catalog.sections(tab.index(), &state.search_query);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -316,7 +263,7 @@ fn render_icon_list(
     }
 }
 
-fn header_line(title: &'static str) -> Line<'static> {
+fn header_line(title: &str) -> Line<'static> {
     let dashes = "─".repeat(3);
     Line::from(vec![
         Span::styled(
@@ -324,7 +271,7 @@ fn header_line(title: &'static str) -> Line<'static> {
             Style::default().fg(theme::MUTED),
         ),
         Span::styled(
-            title,
+            title.to_string(),
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),

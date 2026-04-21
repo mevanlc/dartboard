@@ -31,6 +31,7 @@ pub use dartboard_editor::{
     FloatingSelection, HostEffect, KeyMap, Mode, MoveDir, PanDrag, Selection, SelectionShape,
     Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
+use dartboard_picker_core::adjust_scroll_offset;
 use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
 
 use crate::emoji;
@@ -816,7 +817,7 @@ impl App {
 
     fn open_emoji_picker(&mut self) {
         if self.icon_catalog.is_none() {
-            self.icon_catalog = Some(emoji::catalog::IconCatalogData::load());
+            self.icon_catalog = Some(emoji::catalog::load_catalog());
         }
         self.emoji_picker_state = emoji::EmojiPickerState::default();
         self.emoji_picker_open = true;
@@ -827,7 +828,7 @@ impl App {
             return 0;
         };
         let tab = *self.emoji_picker_state.tab.current();
-        let sections = catalog.sections(tab, &self.emoji_picker_state.search_query);
+        let sections = catalog.sections(tab.index(), &self.emoji_picker_state.search_query);
         emoji::picker::selectable_count(&sections)
     }
 
@@ -851,16 +852,12 @@ impl App {
         catalog: &emoji::catalog::IconCatalogData,
     ) {
         let tab = *state.tab.current();
-        let sections = catalog.sections(tab, &state.search_query);
+        let sections = catalog.sections(tab.index(), &state.search_query);
         let flat_idx =
             emoji::picker::selectable_to_flat(&sections, state.selected_index).unwrap_or(0);
 
         let visible = state.visible_height.get().max(1);
-        if flat_idx < state.scroll_offset {
-            state.scroll_offset = flat_idx;
-        } else if flat_idx >= state.scroll_offset + visible {
-            state.scroll_offset = flat_idx.saturating_sub(visible - 1);
-        }
+        state.scroll_offset = adjust_scroll_offset(state.scroll_offset, visible, flat_idx);
     }
 
     fn picker_insert_selected(&mut self, keep_open: bool) {
@@ -873,7 +870,7 @@ impl App {
                 self.emoji_picker_open = false;
                 return;
             };
-            let sections = catalog.sections(tab, &query);
+            let sections = catalog.sections(tab.index(), &query);
             match emoji::picker::entry_at_selectable(&sections, selected) {
                 Some(entry) => entry.icon.clone(),
                 None => {
@@ -1000,7 +997,7 @@ impl App {
                     return;
                 };
                 let tab = *self.emoji_picker_state.tab.current();
-                let sections = catalog.sections(tab, &self.emoji_picker_state.search_query);
+                let sections = catalog.sections(tab.index(), &self.emoji_picker_state.search_query);
                 let Some(selectable_idx) = emoji::picker::flat_to_selectable(&sections, flat_idx)
                 else {
                     return;
@@ -2111,7 +2108,7 @@ mod tests {
         let expected = {
             let catalog = app.icon_catalog.as_ref().unwrap();
             let tab = *app.emoji_picker_state.tab.current();
-            let sections = catalog.sections(tab, &app.emoji_picker_state.search_query);
+            let sections = catalog.sections(tab.index(), &app.emoji_picker_state.search_query);
             crate::emoji::picker::entry_at_selectable(
                 &sections,
                 app.emoji_picker_state.selected_index,
