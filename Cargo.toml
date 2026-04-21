@@ -15,15 +15,18 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+homepage = "https://github.com/mevanlc/dartboard"
+repository = "https://github.com/mevanlc/dartboard"
+readme = "README.md"
 
 [workspace.dependencies]
-dartboard-core = { path = "dartboard-core" }
-dartboard-picker-core = { path = "dartboard-picker-core" }
-dartboard-editor = { path = "dartboard-editor" }
-dartboard-local = { path = "dartboard-local" }
-dartboard-server = { path = "dartboard-server" }
-dartboard-client-ws = { path = "dartboard-client-ws" }
-dartboard-tui = { path = "dartboard-tui" }
+dartboard-core = { path = "dartboard-core", version = "0.1.0" }
+dartboard-picker-core = { path = "dartboard-picker-core", version = "0.1.0" }
+dartboard-editor = { path = "dartboard-editor", version = "0.1.0" }
+dartboard-local = { path = "dartboard-local", version = "0.1.0" }
+dartboard-server = { path = "dartboard-server", version = "0.1.0" }
+dartboard-client-ws = { path = "dartboard-client-ws", version = "0.1.0" }
+dartboard-tui = { path = "dartboard-tui", version = "0.1.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

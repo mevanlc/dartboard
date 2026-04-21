@@ -48,33 +48,34 @@ jobs:
 
           echo "Version validated: $TAG_VERSION"
 
-      - name: Dry run publish sequence
-        shell: bash
-        run: |
-          cargo publish --dry-run --locked -p dartboard-core
-          cargo publish --dry-run --locked -p dartboard-picker-core
-          cargo publish --dry-run --locked -p dartboard-editor
-          cargo publish --dry-run --locked -p dartboard-local
-          cargo publish --dry-run --locked -p dartboard-client-ws
-          cargo publish --dry-run --locked -p dartboard-tui
-          cargo publish --dry-run --locked -p dartboard-server
-          cargo publish --dry-run --locked -p dartboard-cli
-
       - name: Publish crates to crates.io
         shell: bash
         run: |
-          publish() {
+          verify_then_publish() {
             local package="$1"
+
+            for attempt in $(seq 1 20); do
+              if cargo publish --dry-run --locked -p "$package"; then
+                break
+              fi
+
+              if [ "$attempt" -eq 20 ]; then
+                echo "::error::Dry-run verification failed for $package after $attempt attempts"
+                exit 1
+              fi
+
+              sleep 15
+            done
+
             cargo publish --locked -p "$package"
-            # Give the crates.io index time to reflect newly published internal deps.
             sleep 30
           }
 
-          publish dartboard-core
-          publish dartboard-picker-core
-          publish dartboard-editor
-          publish dartboard-local
-          publish dartboard-client-ws
-          publish dartboard-tui
-          publish dartboard-server
-          publish dartboard-cli
+          verify_then_publish dartboard-core
+          verify_then_publish dartboard-picker-core
+          verify_then_publish dartboard-editor
+          verify_then_publish dartboard-local
+          verify_then_publish dartboard-client-ws
+          verify_then_publish dartboard-tui
+          verify_then_publish dartboard-server
+          verify_then_publish dartboard-cli

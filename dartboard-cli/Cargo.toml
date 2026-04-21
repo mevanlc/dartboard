@@ -3,6 +3,12 @@ name = "dartboard-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/dartboard-cli"
+description = "Terminal drawing board application for local and shared sessions"
+keywords = ["terminal", "tui", "drawing", "canvas", "multiplayer"]
 
 [[bin]]
 name = "dartboard"

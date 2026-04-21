@@ -3,6 +3,12 @@ name = "dartboard-local"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/dartboard-local"
+description = "In-process server and local client transport for dartboard"
+keywords = ["terminal", "canvas", "server", "local", "collab"]
 
 [dependencies]
 dartboard-core.workspace = true

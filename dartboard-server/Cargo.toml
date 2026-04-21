@@ -3,6 +3,12 @@ name = "dartboard-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/dartboard-server"
+description = "WebSocket server transport and headless server for dartboard"
+keywords = ["terminal", "websocket", "server", "canvas", "collab"]
 
 [dependencies]
 dartboard-core.workspace = true

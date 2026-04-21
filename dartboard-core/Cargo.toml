@@ -3,6 +3,12 @@ name = "dartboard-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/dartboard-core"
+description = "Core canvas model, color types, client traits, and wire protocol for dartboard"
+keywords = ["terminal", "canvas", "unicode", "protocol", "collab"]
 
 [dependencies]
 serde.workspace = true
