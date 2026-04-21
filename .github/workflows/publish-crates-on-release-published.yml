@@ -52,8 +52,23 @@ jobs:
       - name: Publish crates to crates.io
         shell: bash
         run: |
+          crate_version_exists() {
+            local package="$1"
+            local version="$2"
+            local url="https://crates.io/api/v1/crates/${package}/${version}"
+            local status
+            status=$(curl -sS -o /dev/null -w "%{http_code}" -A "dartboard-publish-ci" "$url" || true)
+            [ "$status" = "200" ]
+          }
+
           verify_then_publish() {
             local package="$1"
+            local version="$2"
+
+            if crate_version_exists "$package" "$version"; then
+              echo "Skipping $package $version — already on crates.io"
+              return 0
+            fi
 
             for attempt in $(seq 1 20); do
               if cargo publish --dry-run --locked -p "$package"; then
@@ -72,8 +87,10 @@ jobs:
             sleep 30
           }
 
-          verify_then_publish dartboard-core
-          verify_then_publish dartboard-picker-core
-          verify_then_publish dartboard-editor
-          verify_then_publish dartboard-local
-          verify_then_publish dartboard-tui
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          verify_then_publish dartboard-core "$VERSION"
+          verify_then_publish dartboard-picker-core "$VERSION"
+          verify_then_publish dartboard-editor "$VERSION"
+          verify_then_publish dartboard-local "$VERSION"
+          verify_then_publish dartboard-tui "$VERSION"
