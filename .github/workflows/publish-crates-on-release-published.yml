@@ -76,7 +76,4 @@ jobs:
           verify_then_publish dartboard-picker-core
           verify_then_publish dartboard-editor
           verify_then_publish dartboard-local
-          verify_then_publish dartboard-client-ws
           verify_then_publish dartboard-tui
-          verify_then_publish dartboard-server
-          verify_then_publish dartboard-cli
