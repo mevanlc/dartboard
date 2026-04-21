@@ -1302,6 +1302,7 @@ impl App {
                 self.move_right();
                 FloatingOutcome::Consumed
             }
+            Some(EditorAction::StrokeFloating { .. }) => FloatingOutcome::PassThrough,
             Some(EditorAction::Pan { .. })
             | Some(EditorAction::ExportSystemClipboard)
             | Some(EditorAction::ToggleFloatingTransparency) => FloatingOutcome::PassThrough,
@@ -1348,13 +1349,14 @@ fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, AppIntent, AppKey, AppKeyCode, AppModifiers, HelpTab, HostEffect, Mode,
-        SelectionShape, SWATCH_CAPACITY,
+        App, AppIntent, AppKey, AppKeyCode, AppModifiers, AppPointerEvent, AppPointerKind, HelpTab,
+        HostEffect, Mode, SelectionShape, SWATCH_CAPACITY,
     };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use dartboard_core::{Canvas, CellValue, Pos, RgbColor, DEFAULT_HEIGHT, DEFAULT_WIDTH};
+    use dartboard_editor::{Clipboard, FloatingSelection};
     use ratatui::layout::Rect;
 
     fn setup_floating_wide_brush() -> App {
@@ -1506,6 +1508,26 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_arrow_keys_stroke_floating_brush() {
+        let mut app = App::new();
+        app.canvas = Canvas::with_size(8, 4);
+        app.cursor = Pos { x: 2, y: 1 };
+        app.floating = Some(FloatingSelection {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('A'))]),
+            transparent: false,
+            source_index: None,
+        });
+
+        let mods = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        app.handle_key(KeyEvent::new(KeyCode::Right, mods));
+
+        assert_eq!(app.cursor, Pos { x: 3, y: 1 });
+        assert_eq!(app.canvas.get(Pos { x: 2, y: 1 }), 'A');
+        assert_eq!(app.canvas.get(Pos { x: 3, y: 1 }), 'A');
+        assert!(app.floating.is_some());
+    }
+
+    #[test]
     fn right_drag_pans_viewport() {
         let mut app = App::new();
         app.set_viewport(Rect::new(0, 0, 10, 5));
@@ -1524,6 +1546,28 @@ mod tests {
         }));
 
         assert_eq!(app.viewport_origin, Pos { x: 3, y: 1 });
+    }
+
+    #[test]
+    fn pointer_intent_scroll_pans_viewport() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(2, 3, 10, 5));
+        app.viewport_origin = Pos { x: 5, y: 5 };
+
+        let _ = app.handle_intent(AppIntent::Pointer(AppPointerEvent {
+            column: 4,
+            row: 5,
+            kind: AppPointerKind::ScrollRight,
+            modifiers: AppModifiers::default(),
+        }));
+        let _ = app.handle_intent(AppIntent::Pointer(AppPointerEvent {
+            column: 4,
+            row: 5,
+            kind: AppPointerKind::ScrollDown,
+            modifiers: AppModifiers::default(),
+        }));
+
+        assert_eq!(app.viewport_origin, Pos { x: 6, y: 6 });
     }
 
     #[test]

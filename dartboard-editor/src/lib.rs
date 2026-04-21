@@ -115,6 +115,8 @@ pub enum AppPointerKind {
     Moved,
     ScrollUp,
     ScrollDown,
+    ScrollLeft,
+    ScrollRight,
 }
 
 /// A pointer event in the host's display grid.
@@ -168,6 +170,9 @@ pub enum EditorAction {
         extend_selection: bool,
     },
     MoveDownLine,
+    StrokeFloating {
+        dir: MoveDir,
+    },
     Pan {
         dx: isize,
         dy: isize,
@@ -1200,6 +1205,24 @@ fn move_for_dir(editor: &mut EditorSession, canvas: &Canvas, dir: MoveDir) {
     editor.move_dir(canvas, dir);
 }
 
+fn stroke_floating_move(
+    editor: &mut EditorSession,
+    canvas: &mut Canvas,
+    dir: MoveDir,
+    color: RgbColor,
+) {
+    if editor.floating.is_none() {
+        return;
+    }
+
+    let start = editor.cursor;
+    let _ = paint_floating_at_cursor(editor, canvas, color);
+    move_for_dir(editor, canvas, dir);
+    if editor.cursor != start {
+        let _ = paint_floating_at_cursor(editor, canvas, color);
+    }
+}
+
 fn half_page_step(span: usize) -> usize {
     (span / 2).max(1)
 }
@@ -1420,6 +1443,7 @@ pub fn handle_editor_action(
             move_for_dir(editor, canvas, dir);
         }
         EditorAction::MoveDownLine => editor.move_down(canvas),
+        EditorAction::StrokeFloating { dir } => stroke_floating_move(editor, canvas, dir, color),
         EditorAction::Pan { dx, dy } => editor.pan_by(canvas, dx, dy),
         EditorAction::ClearSelection => editor.clear_selection(),
         EditorAction::TransposeSelectionCorner => {
@@ -1494,8 +1518,8 @@ pub enum PointerOutcome {
     /// The editor acted on the event. Suppress outer UI routing.
     Consumed,
     /// The editor did not act on the event (e.g., click outside the
-    /// canvas viewport, scroll event today, mid-drag sample without an
-    /// active drag origin). The host may bubble this event to outer UI.
+    /// canvas viewport, mid-drag sample without an active drag origin).
+    /// The host may bubble this event to outer UI.
     #[default]
     Passthrough,
 }
@@ -1546,8 +1570,9 @@ impl EditorPointerDispatch {
 /// **Hover policy.** Passive [`AppPointerKind::Moved`] events only move
 /// the cursor when a floating selection is armed (so brush/stamp
 /// previews follow the pointer); outside of that, passive motion is a
-/// no-op and passes through. This is the conditional policy layered
-/// hosts typically want — there is no separate knob to toggle it.
+/// no-op and passes through. Scroll wheel events pan the viewport when
+/// they arrive over the canvas viewport. This is the conditional policy
+/// layered hosts typically want — there is no separate knob to toggle it.
 pub fn handle_editor_pointer(
     editor: &mut EditorSession,
     canvas: &mut Canvas,
@@ -1555,6 +1580,14 @@ pub fn handle_editor_pointer(
     color: RgbColor,
 ) -> EditorPointerDispatch {
     let canvas_pos = editor.canvas_pos_for_pointer(mouse.column, mouse.row, canvas);
+
+    if let Some((dx, dy)) = scroll_pan_delta(mouse.kind) {
+        if editor.viewport_contains(mouse.column, mouse.row) {
+            editor.pan_by(canvas, dx, dy);
+            return EditorPointerDispatch::consumed();
+        }
+        return EditorPointerDispatch::default();
+    }
 
     if editor.floating.is_some() {
         match mouse.kind {
@@ -1672,6 +1705,16 @@ pub fn handle_editor_pointer(
             EditorPointerDispatch::default()
         }
         _ => EditorPointerDispatch::default(),
+    }
+}
+
+fn scroll_pan_delta(kind: AppPointerKind) -> Option<(isize, isize)> {
+    match kind {
+        AppPointerKind::ScrollUp => Some((0, -1)),
+        AppPointerKind::ScrollDown => Some((0, 1)),
+        AppPointerKind::ScrollLeft => Some((-1, 0)),
+        AppPointerKind::ScrollRight => Some((1, 0)),
+        _ => None,
     }
 }
 
@@ -2738,6 +2781,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn handle_editor_action_stroke_floating_stamps_current_and_destination() {
+        let mut canvas = Canvas::with_size(6, 3);
+        let mut editor = EditorSession {
+            cursor: Pos { x: 2, y: 1 },
+            floating: Some(FloatingSelection {
+                clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('A'))]),
+                transparent: false,
+                source_index: None,
+            }),
+            ..Default::default()
+        };
+
+        let dispatch = handle_editor_action(
+            &mut editor,
+            &mut canvas,
+            EditorAction::StrokeFloating {
+                dir: MoveDir::Right,
+            },
+            RgbColor::new(9, 8, 7),
+        );
+
+        assert!(dispatch.handled);
+        assert_eq!(editor.cursor, Pos { x: 3, y: 1 });
+        assert_eq!(
+            canvas.cell(Pos { x: 2, y: 1 }),
+            Some(CellValue::Narrow('A'))
+        );
+        assert_eq!(
+            canvas.cell(Pos { x: 3, y: 1 }),
+            Some(CellValue::Narrow('A'))
+        );
+        assert!(editor.floating.is_some());
+    }
+
     fn pointer(col: u16, row: u16, kind: AppPointerKind) -> AppPointerEvent {
         AppPointerEvent {
             column: col,
@@ -2829,18 +2907,81 @@ mod tests {
     }
 
     #[test]
-    fn pointer_scroll_event_passes_through() {
-        let mut canvas = Canvas::with_size(8, 4);
+    fn pointer_scroll_event_pans_viewport_inside_viewport() {
+        let mut canvas = Canvas::with_size(20, 12);
         let mut editor = viewport_editor(&canvas);
+        editor.set_viewport(
+            Viewport {
+                x: 2,
+                y: 3,
+                width: 8,
+                height: 4,
+            },
+            &canvas,
+        );
+        editor.viewport_origin = Pos { x: 5, y: 5 };
 
         let dispatch = handle_editor_pointer(
             &mut editor,
             &mut canvas,
-            pointer(3, 2, AppPointerKind::ScrollUp),
+            pointer(4, 5, AppPointerKind::ScrollUp),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
+        assert_eq!(editor.viewport_origin, Pos { x: 5, y: 4 });
+    }
+
+    #[test]
+    fn pointer_horizontal_scroll_event_pans_viewport_inside_viewport() {
+        let mut canvas = Canvas::with_size(20, 12);
+        let mut editor = viewport_editor(&canvas);
+        editor.set_viewport(
+            Viewport {
+                x: 2,
+                y: 3,
+                width: 8,
+                height: 4,
+            },
+            &canvas,
+        );
+        editor.viewport_origin = Pos { x: 5, y: 5 };
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(4, 5, AppPointerKind::ScrollRight),
+            RgbColor::new(0, 0, 0),
+        );
+
+        assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
+        assert_eq!(editor.viewport_origin, Pos { x: 6, y: 5 });
+    }
+
+    #[test]
+    fn pointer_scroll_event_outside_viewport_passes_through() {
+        let mut canvas = Canvas::with_size(20, 12);
+        let mut editor = viewport_editor(&canvas);
+        editor.set_viewport(
+            Viewport {
+                x: 2,
+                y: 3,
+                width: 8,
+                height: 4,
+            },
+            &canvas,
+        );
+        editor.viewport_origin = Pos { x: 5, y: 5 };
+
+        let dispatch = handle_editor_pointer(
+            &mut editor,
+            &mut canvas,
+            pointer(0, 0, AppPointerKind::ScrollUp),
             RgbColor::new(0, 0, 0),
         );
 
         assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
+        assert_eq!(editor.viewport_origin, Pos { x: 5, y: 5 });
     }
 
     #[test]

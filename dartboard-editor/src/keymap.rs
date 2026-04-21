@@ -205,7 +205,9 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         ..Default::default()
     };
 
-    // Ctrl+Shift+arrow -> pan (must precede Ctrl-only bindings).
+    // Ctrl+Shift+arrow -> pan, or stroke the floating brush when active
+    // (must precede Ctrl-only bindings).
+    let ctrl_shift_help = help(HelpSection::Drawing, "^⇧+←↑↓→", "pan / stroke floating", 80);
     for (code, dx, dy) in [
         (AppKeyCode::Left, -1_isize, 0_isize),
         (AppKeyCode::Right, 1, 0),
@@ -217,10 +219,28 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
                 code,
                 modifiers: ctrl_shift,
             }),
+            action: ActionSpec::Fixed(EditorAction::StrokeFloating {
+                dir: match code {
+                    AppKeyCode::Left => MoveDir::Left,
+                    AppKeyCode::Right => MoveDir::Right,
+                    AppKeyCode::Up => MoveDir::Up,
+                    AppKeyCode::Down => MoveDir::Down,
+                    _ => unreachable!(),
+                },
+            }),
+            context: BindingContext::WhenFloating,
+            description: "stroke floating",
+            help: ctrl_shift_help,
+        });
+        out.push(KeyBinding {
+            trigger: KeyTrigger::Key(AppKey {
+                code,
+                modifiers: ctrl_shift,
+            }),
             action: ActionSpec::Fixed(EditorAction::Pan { dx, dy }),
-            context: BindingContext::Always,
+            context: BindingContext::WhenNotFloating,
             description: "pan viewport",
-            help: help(HelpSection::Drawing, "^⇧+←↑↓→", "pan viewport", 80),
+            help: ctrl_shift_help,
         });
     }
 
@@ -523,6 +543,16 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             code: AppKeyCode::Enter,
             modifiers: none,
         }),
+        action: ActionSpec::Fixed(EditorAction::PastePrimarySwatch),
+        context: BindingContext::WhenFloating,
+        description: "stamp floating",
+        help: help(HelpSection::Clipboard, "enter", "stamp floating", 35),
+    });
+    out.push(KeyBinding {
+        trigger: KeyTrigger::Key(AppKey {
+            code: AppKeyCode::Enter,
+            modifiers: none,
+        }),
         action: ActionSpec::Fixed(EditorAction::MoveDownLine),
         context: BindingContext::Always,
         description: "move to next row",
@@ -644,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_arrow_pans_before_ctrl_only() {
+    fn ctrl_shift_arrow_pans_when_not_floating() {
         let mods = AppModifiers {
             ctrl: true,
             shift: true,
@@ -653,6 +683,19 @@ mod tests {
         assert_eq!(
             resolve(key(AppKeyCode::Left, mods)),
             Some(EditorAction::Pan { dx: -1, dy: 0 })
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_arrow_strokes_when_floating() {
+        let mods = AppModifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_floating(key(AppKeyCode::Left, mods)),
+            Some(EditorAction::StrokeFloating { dir: MoveDir::Left })
         );
     }
 
@@ -669,6 +712,18 @@ mod tests {
         assert_eq!(
             resolve(key(AppKeyCode::Char('v'), mods)),
             Some(EditorAction::PastePrimarySwatch)
+        );
+    }
+
+    #[test]
+    fn enter_stamps_when_floating() {
+        assert_eq!(
+            resolve_floating(key(AppKeyCode::Enter, AppModifiers::default())),
+            Some(EditorAction::PastePrimarySwatch)
+        );
+        assert_eq!(
+            resolve(key(AppKeyCode::Enter, AppModifiers::default())),
+            Some(EditorAction::MoveDownLine)
         );
     }
 

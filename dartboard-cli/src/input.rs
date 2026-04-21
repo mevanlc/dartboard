@@ -59,7 +59,8 @@ pub fn app_pointer_event_from_crossterm(mouse: MouseEvent) -> Option<AppPointerE
         MouseEventKind::Moved => AppPointerKind::Moved,
         MouseEventKind::ScrollUp => AppPointerKind::ScrollUp,
         MouseEventKind::ScrollDown => AppPointerKind::ScrollDown,
-        _ => return None,
+        MouseEventKind::ScrollLeft => AppPointerKind::ScrollLeft,
+        MouseEventKind::ScrollRight => AppPointerKind::ScrollRight,
     };
 
     Some(AppPointerEvent {
@@ -123,6 +124,26 @@ mod tests {
                     shift: true,
                     ..Default::default()
                 },
+            })
+        );
+    }
+
+    #[test]
+    fn pointer_adapter_maps_horizontal_scroll() {
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollRight,
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert_eq!(
+            app_pointer_event_from_crossterm(mouse),
+            Some(AppPointerEvent {
+                column: 12,
+                row: 7,
+                kind: AppPointerKind::ScrollRight,
+                modifiers: AppModifiers::default(),
             })
         );
     }
