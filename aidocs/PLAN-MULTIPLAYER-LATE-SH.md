@@ -1,18 +1,18 @@
 # late-sh Dartboard Integration
 
-Integrate dartboard into late-sh as a shared multi-user activity in the Games arcade. Each SSH session is one dartboard client; one in-proc `dartboard-server` runs for the lifetime of the late-sh process and owns the canonical canvas everyone draws on.
+Integrate dartboard into late-sh as a shared multi-user activity in the Games arcade. Each SSH session is one dartboard client; one in-proc `dartboard-local` server runs for the lifetime of the late-sh process and owns the canonical canvas everyone draws on.
 
 ## Prereqs
-- `PLAN-SINGLEPLAYER-INPROC.md` — **required**. Establishes the 4-crate workspace, wire protocol, `Client` trait, `LocalClient`, in-proc `Server`. Late-sh's integration is essentially "host one shared `Server`, give each SSH session a `LocalClient`."
+- `PLAN-SINGLEPLAYER-INPROC.md` — **required**. Establishes the workspace split, wire protocol, `Client` trait, `LocalClient`, and in-proc server. Late-sh's integration is essentially "host one shared `ServerHandle`, give each SSH session a `LocalClient`."
 - `PLAN-MULTIPLAYER-WS-DEMO.md` — **not required**. Late-sh only uses `LocalClient` (no `dartboard-client-ws` dep). The WS plan is useful as a validation step that the multi-client paths through the server work before adding real users via late-sh, but it isn't a blocker.
 
 ## Workspace integration
-- Add `dartboard-core` and `dartboard-server` as deps in late-sh root `Cargo.toml` (path or git initially; published crates eventually)
+- Add `dartboard-core` and `dartboard-local` as deps in late-sh root `Cargo.toml` (path or git initially; published crates eventually)
 - Late-sh does **not** depend on `dartboard-client-ws`. That's the whole point of the upfront crate split — no `tokio-tungstenite` or related transitive deps in the late-sh binary.
-- `LocalClient` (re-exported from `dartboard-server`) is the only client impl late-sh uses.
+- `LocalClient` (from `dartboard-local`) is the only client impl late-sh uses.
 
 ## Shared server
-- One `dartboard_server::Server` instance, spawned at late-sh startup (likely in `late-ssh/src/main.rs` next to other shared service init)
+- One `dartboard_local::ServerHandle` instance, spawned at late-sh startup (likely in `late-ssh/src/main.rs` next to other shared service init)
 - Held in `Arc<ServerHandle>`; threaded into `SessionConfig` (see `late-ssh/src/ssh.rs:633-688`)
 - `CanvasStore` impl for v1: in-memory. v2: postgres-backed via `late-core` (snapshot table + op log table; periodic snapshot, replay log on boot). v2 is its own plan, don't block on it.
 

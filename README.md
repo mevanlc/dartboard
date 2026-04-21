@@ -28,7 +28,8 @@ What does not exist yet:
 - `dartboard-core`: canvas model, operations, wire types
 - `dartboard-editor`: host-neutral editor/session logic and keymap
 - `dartboard-tui`: reusable ratatui canvas widget
-- `dartboard-server`: in-process server, local client, websocket listener, `dartboardd`
+- `dartboard-local`: in-process server, local client, store trait
+- `dartboard-server`: websocket listener and `dartboardd`, built on `dartboard-local`
 - `dartboard-client-ws`: websocket client transport
 - `dartboard-cli`: the `dartboard` terminal application
 

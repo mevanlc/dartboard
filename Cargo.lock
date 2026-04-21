@@ -286,13 +286,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dartboard-local"
+version = "0.1.0"
+dependencies = [
+ "dartboard-core",
+]
+
+[[package]]
 name = "dartboard-server"
 version = "0.1.0"
 dependencies = [
  "dartboard-client-ws",
  "dartboard-core",
+ "dartboard-local",
  "futures-util",
- "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

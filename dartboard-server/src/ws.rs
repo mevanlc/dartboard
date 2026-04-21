@@ -9,8 +9,17 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 
 use dartboard_core::{ClientMsg, ServerMsg};
+use dartboard_local::ServerSink;
 
-use crate::{EntrySender, Hello, ServerHandle};
+use crate::{Hello, ServerHandle};
+
+struct WsSink(tokio::sync::mpsc::UnboundedSender<ServerMsg>);
+
+impl ServerSink for WsSink {
+    fn send(&self, msg: ServerMsg) -> bool {
+        self.0.send(msg).is_ok()
+    }
+}
 
 pub(crate) async fn accept_and_run(
     server: ServerHandle,
@@ -38,7 +47,7 @@ pub(crate) async fn accept_and_run(
             }
         }
     });
-    let user_id = match server.register(hello, EntrySender::Ws(outbound_tx)) {
+    let user_id = match server.register_transport(hello, Box::new(WsSink(outbound_tx))) {
         Ok(user_id) => user_id,
         Err(_) => {
             let _ = writer.await;
@@ -56,12 +65,12 @@ pub(crate) async fn accept_and_run(
         match msg {
             ClientMsg::Hello { .. } => {}
             ClientMsg::Op { client_op_id, op } => {
-                server.submit_op(user_id, client_op_id, op);
+                server.submit_op_for(user_id, client_op_id, op);
             }
         }
     }
 
-    server.disconnect(user_id);
+    server.disconnect_user(user_id);
     writer.abort();
     Ok(())
 }

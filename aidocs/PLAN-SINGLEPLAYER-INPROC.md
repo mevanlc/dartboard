@@ -3,8 +3,8 @@
 Foundational refactor: dartboard standalone runs as integrated client/server in a single process. UI talks to the canonical canvas via a `Client` trait, not by mutating `App` directly. No network, no second process. This is the substrate for both WS multiplayer and late-sh integration.
 
 ## Goals
-- 4-crate workspace established (sets the dependency boundary so late-sh never accidentally pulls `tokio-tungstenite`)
-- Canvas state owned by `dartboard-server::Server`, not by the UI's `App`
+- 5-crate workspace established (sets the dependency boundary so late-sh never accidentally pulls `tokio-tungstenite`)
+- Canvas state owned by `dartboard-local::ServerHandle`, not by the UI's `App`
 - UI mutations go through the `dartboard-core::Client` trait (one impl in this plan: `LocalClient`)
 - Wire protocol (`ClientMsg`/`ServerMsg`/`CanvasOp`) defined in `dartboard-core` and used even on the LocalClient path — protocol uniformity across transports
 - Optimistic local apply on op submission (no observable latency for LocalClient, but the code path matches what WS will need)
@@ -13,11 +13,12 @@ Foundational refactor: dartboard standalone runs as integrated client/server in 
 
 ## Crate split (sets the layout for all subsequent plans)
 - `dartboard-core` — `Canvas`, `Pos`, `CanvasOp`, snapshot/diff types, wire types (`ClientMsg`, `ServerMsg`), `Client` trait. Deps: `serde` only. No tokio. No async runtime.
-- `dartboard-server` — `Server` (owns canonical `Canvas` + op log), `LocalClient` (channel-based, paired with in-proc server), `CanvasStore` trait. Deps: `tokio`, `dartboard-core`.
+- `dartboard-local` — in-proc `ServerHandle` (owns canonical `Canvas` + op log), `LocalClient` (channel-based, paired with the in-proc server), `CanvasStore` trait. No websocket deps.
+- `dartboard-server` — websocket listener and headless `dartboardd`, built on `dartboard-local`.
 - `dartboard-client-ws` — `WebsocketClient`. Deps: `tokio`, `tokio-tungstenite`, `dartboard-core`. **Stub crate in this plan** (Cargo.toml + empty `lib.rs`). Reserves the dependency boundary up front. Filled in by `PLAN-MULTIPLAYER-WS-DEMO.md`.
 - `dartboard` — binary. UI + bindings. Deps: `dartboard-core`, `dartboard-server`, `ratatui`, `crossterm`. Spawns embedded server + LocalClient on startup.
 
-late-sh will depend on `dartboard-core` + `dartboard-server` only — never on `dartboard-client-ws`. Establishing this layout up front avoids retrofit pain.
+late-sh will depend on `dartboard-core` + `dartboard-local` only — never on `dartboard-client-ws`. Establishing this layout up front avoids retrofit pain.
 
 ## Wire protocol
 JSON via serde for v1 (debuggable). Switch to bincode/postcard later if size matters. Used by LocalClient (in-proc channels carrying these typed values, no serialization) and (later) WebsocketClient (same types serialized over ws).
@@ -52,16 +53,16 @@ LocalClient and WebsocketClient implement the same `Client` trait over these typ
 - `CanvasStore` trait + in-mem default impl (file-backed and other impls are follow-ups)
 
 ## Refactor steps
-1. Convert `dartboard/` root into a Cargo workspace, members = `["dartboard-core", "dartboard-server", "dartboard-client-ws", "dartboard"]`. Move existing `src/` into `dartboard/src/`.
+1. Convert `dartboard/` root into a Cargo workspace, members = `["dartboard-core", "dartboard-local", "dartboard-server", "dartboard-client-ws", "dartboard"]`. Move existing `src/` into `dartboard/src/`.
 2. Carve `dartboard-core`:
    - Move `canvas.rs` → `dartboard-core/src/canvas.rs`; move `Pos`, color types
    - Define `CanvasOp` enum — find every site that mutates `Canvas` in current code, identify the op shape
    - Define wire types (`ClientMsg`, `ServerMsg`, `Peer`)
    - Define `Client` trait: `submit_op`, `next_event`, `current_snapshot` (or similar)
-3. Build `dartboard-server`: `Server`, `spawn_local`, `ServerHandle::connect_local`, `LocalClient` impl, `CanvasStore` trait + in-mem default
+3. Build `dartboard-local`: `spawn_local`, `ServerHandle::connect_local`, `LocalClient` impl, `CanvasStore` trait + in-mem default
 4. Create `dartboard-client-ws` as a stub crate (Cargo.toml + empty `lib.rs`). Reserves the boundary; the WS plan fills it in.
 5. Refactor `dartboard` binary:
-   - Startup: `let server = Server::spawn_local(InMemStore::default()); let client = server.connect_local(Hello { ... });`
+  - Startup: `let server = ServerHandle::spawn_local(InMemStore); let client = server.connect_local(Hello { ... });`
    - `App` no longer holds `Canvas` directly. Holds a snapshot mirror (updated from client events) + per-session UI state (viewport, cursor, swatches, etc.)
    - Every input handler that previously mutated canvas now: (a) applies op to the mirror immediately, (b) calls `client.submit_op(op)`. Round-trip is sub-millisecond.
 6. Verify: drawing, selection, paste, swatches, emoji picker, undo/redo all work as before. Undo operates on the local mirror snapshot stack.

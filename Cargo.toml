@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "dartboard-core",
     "dartboard-editor",
+    "dartboard-local",
     "dartboard-server",
     "dartboard-client-ws",
     "dartboard-tui",
@@ -17,6 +18,7 @@ license = "MIT"
 [workspace.dependencies]
 dartboard-core = { path = "dartboard-core" }
 dartboard-editor = { path = "dartboard-editor" }
+dartboard-local = { path = "dartboard-local" }
 dartboard-server = { path = "dartboard-server" }
 dartboard-client-ws = { path = "dartboard-client-ws" }
 dartboard-tui = { path = "dartboard-tui" }

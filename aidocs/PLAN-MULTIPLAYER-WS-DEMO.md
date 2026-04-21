@@ -3,7 +3,7 @@
 Add WebSocket transport to dartboard so multiple clients across processes can share one canvas. Builds on the integrated-server foundation from `PLAN-SINGLEPLAYER-INPROC.md`; the wire protocol and `Client` trait already exist there — this plan adds a second `Client` impl and a network listener on the server.
 
 ## Prereq
-- `PLAN-SINGLEPLAYER-INPROC.md` — required. Establishes the 4-crate workspace, wire protocol (`ClientMsg`/`ServerMsg`/`CanvasOp`), `Client` trait, `LocalClient`, in-proc `Server`. The dartboard binary already runs as integrated client/server before this plan starts.
+- `PLAN-SINGLEPLAYER-INPROC.md` — required. Establishes the workspace split, wire protocol (`ClientMsg`/`ServerMsg`/`CanvasOp`), `Client` trait, `LocalClient`, and in-proc server. The dartboard binary already runs as integrated client/server before this plan starts.
 
 ## Goals
 - WebSocket transport for cross-process play
@@ -15,12 +15,13 @@ Add WebSocket transport to dartboard so multiple clients across processes can sh
 ## Crate split (recap)
 Established by `PLAN-SINGLEPLAYER-INPROC.md`:
 - `dartboard-core` — types + `Client` trait + wire types. Pure, serde only.
-- `dartboard-server` — `Server` + `LocalClient` + `CanvasStore`. **This plan adds `Server::bind_ws(addr)`.**
+- `dartboard-local` — in-proc `ServerHandle` + `LocalClient` + `CanvasStore`.
+- `dartboard-server` — websocket listener built on `dartboard-local`. **This plan adds `ServerHandle::bind_ws(addr)`.**
 - `dartboard-client-ws` — was a stub; **this plan fills in `WebsocketClient`.**
 - `dartboard` — binary. **This plan adds `--connect` and `--listen` flags.**
 
 ## Server additions
-- `Server::bind_ws(addr)` accepts incoming ws upgrade requests; for each connection, runs the same per-connection task that `connect_local` already runs. Only the framing differs (serde-json over ws frames vs in-memory `ClientMsg`/`ServerMsg` values on mpsc).
+- `ServerHandle::bind_ws(addr)` accepts incoming ws upgrade requests; for each connection, runs the same per-connection task that `connect_local` already runs. Only the framing differs (serde-json over ws frames vs in-memory `ClientMsg`/`ServerMsg` values on mpsc).
 - Same canonical canvas, same op log, same broadcast fan-out as singleplayer.
 - Per-connection task: read `ClientMsg`, validate (bounds, glyph allowed, rate-limit), apply, assign global `seq`, ack sender, broadcast to peers.
 - Library choice: `tokio-tungstenite` directly, or `axum` with ws upgrade — pick whichever is cleanest for a non-HTTP use. (`axum` may be overkill if there are no HTTP routes.)
@@ -37,7 +38,7 @@ Established by `PLAN-SINGLEPLAYER-INPROC.md`:
 - Undo gets disabled at runtime when peers > 1. Tracking: client maintains a peer count from `Welcome`/`PeerJoined`/`PeerLeft`; if > 1 (i.e. someone else is connected), `^Z` becomes a no-op (or shows a toast: "undo disabled in multi-user"). Why: the local snapshot stack from SP plan can include cells another peer has painted; "undoing" would clobber their work.
 
 ## Phases
-1. Add ws transport in `dartboard-server`: `Server::bind_ws(addr)`. Hand each new connection to the existing per-connection task with a different framing wrapper.
+1. Add ws transport in `dartboard-server`: `ServerHandle::bind_ws(addr)`. Hand each new connection to the existing per-connection task in `dartboard-local` with a different framing wrapper.
 2. Fill in `dartboard-client-ws`: `WebsocketClient` impls `Client`, basic reconnect with backoff.
 3. Add `--connect <url>` and `--listen <addr>` flags. Default (no flag) = embedded server + LocalClient (already works from SP plan). `--connect` skips embedded server, uses `WebsocketClient`. `--listen` runs only `bind_ws` (no UI, no client).
 4. Add the peers-aware undo gate in the binary's input handlers.

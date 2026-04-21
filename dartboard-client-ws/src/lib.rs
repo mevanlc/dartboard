@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use dartboard_core::{CanvasOp, Client, ClientMsg, ClientOpId, RgbColor, ServerMsg};
 
-/// The same Hello shape [`dartboard_server::Hello`] uses; defined here to
+/// The same Hello shape [`dartboard_local::Hello`] uses; defined here to
 /// avoid a server dep from the client-ws crate.
 #[derive(Debug, Clone)]
 pub struct Hello {
