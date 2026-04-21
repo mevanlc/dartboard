@@ -95,7 +95,9 @@ fn resolve_binding(binding: &KeyBinding, key: AppKey) -> Option<EditorAction> {
             _ => None,
         },
         KeyTrigger::HomeRowChar(mods) => match key.code {
-            AppKeyCode::Char(ch) if key.modifiers == mods && swatch_home_row_index(ch).is_some() => {
+            AppKeyCode::Char(ch)
+                if key.modifiers == mods && swatch_home_row_index(ch).is_some() =>
+            {
                 build_action(binding.action, key)
             }
             _ => None,
@@ -190,9 +192,21 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
 
     // Ctrl+key editor commands.
     for (code, action, desc) in [
-        (AppKeyCode::Backspace, EditorAction::PushLeft, "push column left"),
-        (AppKeyCode::Char('h'), EditorAction::PushLeft, "push column left"),
-        (AppKeyCode::Char('j'), EditorAction::PushDown, "push row down"),
+        (
+            AppKeyCode::Backspace,
+            EditorAction::PushLeft,
+            "push column left",
+        ),
+        (
+            AppKeyCode::Char('h'),
+            EditorAction::PushLeft,
+            "push column left",
+        ),
+        (
+            AppKeyCode::Char('j'),
+            EditorAction::PushDown,
+            "push row down",
+        ),
         (AppKeyCode::Char('k'), EditorAction::PushUp, "push row up"),
         (
             AppKeyCode::Char('l'),

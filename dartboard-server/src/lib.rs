@@ -531,10 +531,10 @@ mod tests {
     fn next_connect_is_rejected_when_server_is_full() {
         let server = ServerHandle::spawn_local(InMemStore);
         let mut clients = Vec::new();
-        for i in 0..MAX_PLAYERS {
+        for (i, color) in PLAYER_PALETTE.iter().copied().enumerate().take(MAX_PLAYERS) {
             clients.push(server.connect_local(Hello {
                 name: format!("peer{i}"),
-                color: PLAYER_PALETTE[i],
+                color,
             }));
         }
 

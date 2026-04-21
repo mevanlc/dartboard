@@ -179,9 +179,7 @@ mod tests {
         assert_eq!(mirror.peers[0].user_id, 20);
 
         // Unknown peer leave is a no-op.
-        assert!(mirror
-            .apply(ServerMsg::PeerLeft { user_id: 999 })
-            .is_none());
+        assert!(mirror.apply(ServerMsg::PeerLeft { user_id: 999 }).is_none());
     }
 
     #[test]

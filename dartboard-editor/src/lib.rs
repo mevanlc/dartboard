@@ -160,9 +160,15 @@ pub enum MoveDir {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorAction {
-    Move { dir: MoveDir, extend_selection: bool },
+    Move {
+        dir: MoveDir,
+        extend_selection: bool,
+    },
     MoveDownLine,
-    Pan { dx: isize, dy: isize },
+    Pan {
+        dx: isize,
+        dy: isize,
+    },
     ClearSelection,
     TransposeSelectionCorner,
 
@@ -548,12 +554,7 @@ impl EditorSession {
         col >= vx && row >= vy && col < vx + vw && row < vy + vh
     }
 
-    pub fn canvas_pos_for_pointer(
-        &self,
-        col: u16,
-        row: u16,
-        canvas: &Canvas,
-    ) -> Option<Pos> {
+    pub fn canvas_pos_for_pointer(&self, col: u16, row: u16, canvas: &Canvas) -> Option<Pos> {
         if !self.viewport_contains(col, row) {
             return None;
         }
@@ -2765,7 +2766,10 @@ mod tests {
         assert_eq!(dispatch.stroke_hint, Some(PointerStrokeHint::Begin));
         assert_eq!(editor.cursor, Pos { x: 3, y: 1 });
         assert!(editor.paint_stroke_anchor.is_some());
-        assert_eq!(canvas.cell(Pos { x: 3, y: 1 }), Some(CellValue::Narrow('x')));
+        assert_eq!(
+            canvas.cell(Pos { x: 3, y: 1 }),
+            Some(CellValue::Narrow('x'))
+        );
     }
 
     #[test]

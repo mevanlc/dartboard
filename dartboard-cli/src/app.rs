@@ -7,9 +7,9 @@ use crossterm::{clipboard::CopyToClipboard, execute};
 use ratatui::layout::Rect;
 
 use dartboard_client_ws::WebsocketClient;
-use dartboard_core::{Canvas, CanvasOp, Client, ClientOpId, Pos, RgbColor, ServerMsg};
 #[cfg(test)]
 use dartboard_core::UserId;
+use dartboard_core::{Canvas, CanvasOp, Client, ClientOpId, Pos, RgbColor, ServerMsg};
 #[cfg(test)]
 use dartboard_editor::{
     backspace as editor_backspace, copy_selection_or_cell as editor_copy_selection_or_cell,
@@ -21,10 +21,10 @@ use dartboard_editor::{
 };
 use dartboard_editor::{
     diff_canvas_op as editor_diff_canvas_op, dismiss_floating as editor_dismiss_floating,
-    end_paint_stroke as editor_end_paint_stroke,
-    handle_editor_action as editor_handle_action, handle_editor_pointer as editor_handle_pointer,
-    insert_char as editor_insert_char, paste_text_block as editor_paste_text_block,
-    stamp_floating as editor_stamp_floating, MirrorEvent, PointerStrokeHint, SessionMirror,
+    end_paint_stroke as editor_end_paint_stroke, handle_editor_action as editor_handle_action,
+    handle_editor_pointer as editor_handle_pointer, insert_char as editor_insert_char,
+    paste_text_block as editor_paste_text_block, stamp_floating as editor_stamp_floating,
+    MirrorEvent, PointerStrokeHint, SessionMirror,
 };
 pub use dartboard_editor::{
     Clipboard, ConnectState, EditorAction, EditorContext, EditorPointerDispatch, EditorSession,
@@ -101,7 +101,7 @@ impl HelpTab {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct UserSession {
     editor: EditorSession,
     show_help: bool,
@@ -109,19 +109,6 @@ struct UserSession {
     emoji_picker_open: bool,
     emoji_picker_state: emoji::EmojiPickerState,
     paint_canvas_before: Option<Canvas>,
-}
-
-impl Default for UserSession {
-    fn default() -> Self {
-        Self {
-            editor: EditorSession::default(),
-            show_help: false,
-            help_tab: HelpTab::default(),
-            emoji_picker_open: false,
-            emoji_picker_state: emoji::EmojiPickerState::default(),
-            paint_canvas_before: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +147,12 @@ pub struct App {
     users: Vec<LocalUser>,
     active_user_idx: usize,
     transport: Transport,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl App {
@@ -738,7 +731,6 @@ impl App {
         self.with_editor_session_mut(|editor, _| editor_dismiss_floating(editor));
     }
 
-
     #[cfg(test)]
     fn paste_clipboard(&mut self) {
         let color = self.active_user_color();
@@ -1235,15 +1227,13 @@ impl App {
                 FloatingOutcome::Consumed
             }
             Some(EditorAction::Move {
-                dir: MoveDir::Down,
-                ..
+                dir: MoveDir::Down, ..
             }) => {
                 self.move_down();
                 FloatingOutcome::Consumed
             }
             Some(EditorAction::Move {
-                dir: MoveDir::Left,
-                ..
+                dir: MoveDir::Left, ..
             }) => {
                 self.move_left();
                 FloatingOutcome::Consumed
