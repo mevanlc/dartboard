@@ -484,6 +484,19 @@ impl EditorSession {
         self.scroll_viewport_to_cursor(canvas);
     }
 
+    pub fn move_dir(&mut self, canvas: &Canvas, dir: MoveDir) {
+        match dir {
+            MoveDir::Up => self.move_up(canvas),
+            MoveDir::Down => self.move_down(canvas),
+            MoveDir::Left => self.move_left(canvas),
+            MoveDir::Right => self.move_right(canvas),
+            MoveDir::LineStart => move_to_left_edge(self, canvas),
+            MoveDir::LineEnd => move_to_right_edge(self, canvas),
+            MoveDir::PageUp => move_to_top_edge(self, canvas),
+            MoveDir::PageDown => move_to_bottom_edge(self, canvas),
+        }
+    }
+
     pub fn scroll_viewport_to_cursor(&mut self, canvas: &Canvas) {
         let bounds = self.visible_bounds(canvas);
         if self.cursor.x < bounds.min_x {
@@ -1148,32 +1161,91 @@ pub fn fill_selection_or_cell(
 }
 
 fn move_to_left_edge(editor: &mut EditorSession, canvas: &Canvas) {
-    editor.cursor.x = editor.visible_bounds(canvas).min_x;
+    let bounds = editor.visible_bounds(canvas);
+    if editor.cursor.x == bounds.min_x && bounds.min_x > 0 {
+        scroll_half_viewport_left(editor, canvas, bounds);
+    } else {
+        editor.cursor.x = bounds.min_x;
+    }
 }
 
 fn move_to_right_edge(editor: &mut EditorSession, canvas: &Canvas) {
-    editor.cursor.x = editor.visible_bounds(canvas).max_x;
+    let bounds = editor.visible_bounds(canvas);
+    if editor.cursor.x == bounds.max_x && bounds.max_x + 1 < canvas.width {
+        scroll_half_viewport_right(editor, canvas, bounds);
+    } else {
+        editor.cursor.x = bounds.max_x;
+    }
 }
 
 fn move_to_top_edge(editor: &mut EditorSession, canvas: &Canvas) {
-    editor.cursor.y = editor.visible_bounds(canvas).min_y;
+    let bounds = editor.visible_bounds(canvas);
+    if editor.cursor.y == bounds.min_y && bounds.min_y > 0 {
+        scroll_half_viewport_up(editor, canvas, bounds);
+    } else {
+        editor.cursor.y = bounds.min_y;
+    }
 }
 
 fn move_to_bottom_edge(editor: &mut EditorSession, canvas: &Canvas) {
-    editor.cursor.y = editor.visible_bounds(canvas).max_y;
+    let bounds = editor.visible_bounds(canvas);
+    if editor.cursor.y == bounds.max_y && bounds.max_y + 1 < canvas.height {
+        scroll_half_viewport_down(editor, canvas, bounds);
+    } else {
+        editor.cursor.y = bounds.max_y;
+    }
 }
 
 fn move_for_dir(editor: &mut EditorSession, canvas: &Canvas, dir: MoveDir) {
-    match dir {
-        MoveDir::Up => editor.move_up(canvas),
-        MoveDir::Down => editor.move_down(canvas),
-        MoveDir::Left => editor.move_left(canvas),
-        MoveDir::Right => editor.move_right(canvas),
-        MoveDir::LineStart => move_to_left_edge(editor, canvas),
-        MoveDir::LineEnd => move_to_right_edge(editor, canvas),
-        MoveDir::PageUp => move_to_top_edge(editor, canvas),
-        MoveDir::PageDown => move_to_bottom_edge(editor, canvas),
-    }
+    editor.move_dir(canvas, dir);
+}
+
+fn half_page_step(span: usize) -> usize {
+    (span / 2).max(1)
+}
+
+fn scroll_half_viewport_left(editor: &mut EditorSession, canvas: &Canvas, bounds: Bounds) {
+    let start_x = editor.viewport_origin.x;
+    editor.viewport_origin.x = editor
+        .viewport_origin
+        .x
+        .saturating_sub(half_page_step(bounds.width()));
+    editor.clamp_viewport_origin(canvas);
+    let delta = start_x - editor.viewport_origin.x;
+    editor.cursor.x = editor.cursor.x.saturating_sub(delta);
+}
+
+fn scroll_half_viewport_right(editor: &mut EditorSession, canvas: &Canvas, bounds: Bounds) {
+    let start_x = editor.viewport_origin.x;
+    editor.viewport_origin.x = editor
+        .viewport_origin
+        .x
+        .saturating_add(half_page_step(bounds.width()));
+    editor.clamp_viewport_origin(canvas);
+    let delta = editor.viewport_origin.x - start_x;
+    editor.cursor.x = (editor.cursor.x + delta).min(canvas.width.saturating_sub(1));
+}
+
+fn scroll_half_viewport_up(editor: &mut EditorSession, canvas: &Canvas, bounds: Bounds) {
+    let start_y = editor.viewport_origin.y;
+    editor.viewport_origin.y = editor
+        .viewport_origin
+        .y
+        .saturating_sub(half_page_step(bounds.height()));
+    editor.clamp_viewport_origin(canvas);
+    let delta = start_y - editor.viewport_origin.y;
+    editor.cursor.y = editor.cursor.y.saturating_sub(delta);
+}
+
+fn scroll_half_viewport_down(editor: &mut EditorSession, canvas: &Canvas, bounds: Bounds) {
+    let start_y = editor.viewport_origin.y;
+    editor.viewport_origin.y = editor
+        .viewport_origin
+        .y
+        .saturating_add(half_page_step(bounds.height()));
+    editor.clamp_viewport_origin(canvas);
+    let delta = editor.viewport_origin.y - start_y;
+    editor.cursor.y = (editor.cursor.y + delta).min(canvas.height.saturating_sub(1));
 }
 
 fn glyph_anchor(editor: &EditorSession, canvas: &Canvas) -> Pos {
@@ -1890,6 +1962,51 @@ mod tests {
 
         assert_eq!(session.cursor, Pos { x: 4, y: 2 });
         assert_eq!(session.viewport_origin, Pos { x: 1, y: 0 });
+    }
+
+    #[test]
+    fn move_page_down_scrolls_half_viewport_when_already_at_bottom_edge() {
+        let canvas = Canvas::with_size(40, 30);
+        let mut session = EditorSession {
+            cursor: Pos { x: 3, y: 1 },
+            viewport: Viewport {
+                width: 8,
+                height: 5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        session.move_dir(&canvas, MoveDir::PageDown);
+        assert_eq!(session.cursor, Pos { x: 3, y: 4 });
+        assert_eq!(session.viewport_origin, Pos { x: 0, y: 0 });
+
+        session.move_dir(&canvas, MoveDir::PageDown);
+        assert_eq!(session.cursor, Pos { x: 3, y: 6 });
+        assert_eq!(session.viewport_origin, Pos { x: 0, y: 2 });
+    }
+
+    #[test]
+    fn move_home_scrolls_half_viewport_when_already_at_left_edge() {
+        let canvas = Canvas::with_size(40, 20);
+        let mut session = EditorSession {
+            cursor: Pos { x: 10, y: 2 },
+            viewport: Viewport {
+                width: 6,
+                height: 4,
+                ..Default::default()
+            },
+            viewport_origin: Pos { x: 8, y: 0 },
+            ..Default::default()
+        };
+
+        session.move_dir(&canvas, MoveDir::LineStart);
+        assert_eq!(session.cursor, Pos { x: 8, y: 2 });
+        assert_eq!(session.viewport_origin, Pos { x: 8, y: 0 });
+
+        session.move_dir(&canvas, MoveDir::LineStart);
+        assert_eq!(session.cursor, Pos { x: 5, y: 2 });
+        assert_eq!(session.viewport_origin, Pos { x: 5, y: 0 });
     }
 
     #[test]
