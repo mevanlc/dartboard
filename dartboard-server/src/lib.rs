@@ -22,7 +22,7 @@ pub use store::{CanvasStore, InMemStore};
 /// Candidate colors offered to joining users whose requested color collides
 /// with one already in use. Kept in sync with the client-side palette in
 /// `dartboard/src/theme.rs`.
-const PLAYER_PALETTE: [RgbColor; 8] = [
+const PLAYER_PALETTE: [RgbColor; 9] = [
     RgbColor::new(255, 110, 64),
     RgbColor::new(255, 196, 64),
     RgbColor::new(145, 226, 88),
@@ -31,6 +31,7 @@ const PLAYER_PALETTE: [RgbColor; 8] = [
     RgbColor::new(128, 163, 255),
     RgbColor::new(192, 132, 255),
     RgbColor::new(255, 124, 196),
+    RgbColor::new(176, 48, 56),
 ];
 
 /// Max concurrent players on a single shared canvas. Equal to the palette
