@@ -2704,9 +2704,12 @@ mod tests {
     }
 
     #[test]
-    fn pointer_moved_without_floating_passes_through() {
+    fn pointer_moved_without_floating_does_not_move_caret() {
+        // Default host policy: passive hover over the canvas must not drag
+        // the caret around when no floating preview is armed.
         let mut canvas = Canvas::with_size(8, 4);
         let mut editor = viewport_editor(&canvas);
+        let initial_cursor = editor.cursor;
 
         let dispatch = handle_editor_pointer(
             &mut editor,
@@ -2716,6 +2719,7 @@ mod tests {
         );
 
         assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
+        assert_eq!(editor.cursor, initial_cursor);
     }
 
     #[test]
