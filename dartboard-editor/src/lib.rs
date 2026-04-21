@@ -22,8 +22,16 @@
 //!    [`PointerOutcome::Consumed`] means suppress outer UI;
 //!    [`PointerOutcome::Passthrough`] means the editor did not act on the
 //!    event and the host may bubble it to outer layers.
-//! 6. Pass [`PointerOptions`] to [`handle_editor_pointer_with`] when the
-//!    host wants to opt out of hover tracking or tune other knobs.
+//!
+//! ## Default pointer policy
+//!
+//! [`handle_editor_pointer`] implements the hover policy most hosts want:
+//! passive [`AppPointerKind::Moved`] events over the canvas do **not**
+//! move the caret when no floating preview is armed, and **do** follow
+//! the cursor when one is (so brush/stamp previews track the pointer).
+//! Layered hosts should simply forward every [`AppPointerEvent`] they
+//! want the editor to see and rely on [`PointerOutcome`] to decide
+//! whether to bubble.
 //!
 //! Crossterm adapters for the reference CLI live in the `dartboard-cli`
 //! crate. Non-crossterm hosts (e.g., VTE-based shells) construct
@@ -1412,25 +1420,6 @@ impl PointerOutcome {
     }
 }
 
-/// Host-selectable pointer-handling knobs. Construct with `Default` and
-/// flip individual fields to opt out of specific behaviors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PointerOptions {
-    /// If `true`, [`AppPointerKind::Moved`] events track the cursor in
-    /// the canvas (useful for floating-selection preview). Hosts that
-    /// receive a lot of passive mouse motion (e.g., VTE-based shells
-    /// with a canvas embedded in larger chrome) can set this to `false`
-    /// to suppress hover tracking without filtering events before
-    /// dispatch. Default: `true`.
-    pub track_hover: bool,
-}
-
-impl Default for PointerOptions {
-    fn default() -> Self {
-        Self { track_hover: true }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EditorPointerDispatch {
     pub outcome: PointerOutcome,
@@ -1453,19 +1442,6 @@ impl EditorPointerDispatch {
     }
 }
 
-/// Apply a pointer event to the editor using default [`PointerOptions`].
-///
-/// See [`handle_editor_pointer_with`] for the full contract and for
-/// host-selectable knobs like hover tracking.
-pub fn handle_editor_pointer(
-    editor: &mut EditorSession,
-    canvas: &mut Canvas,
-    mouse: AppPointerEvent,
-    color: RgbColor,
-) -> EditorPointerDispatch {
-    handle_editor_pointer_with(editor, canvas, mouse, color, PointerOptions::default())
-}
-
 /// Apply a pointer event to the editor and return the dispatch outcome
 /// plus any paint-stroke grouping hint the host should honor for undo
 /// bookkeeping.
@@ -1476,21 +1452,23 @@ pub fn handle_editor_pointer(
 ///
 /// The returned [`PointerOutcome`] distinguishes events the editor
 /// consumed (suppress outer routing) from events that should bubble.
-pub fn handle_editor_pointer_with(
+///
+/// **Hover policy.** Passive [`AppPointerKind::Moved`] events only move
+/// the cursor when a floating selection is armed (so brush/stamp
+/// previews follow the pointer); outside of that, passive motion is a
+/// no-op and passes through. This is the conditional policy layered
+/// hosts typically want — there is no separate knob to toggle it.
+pub fn handle_editor_pointer(
     editor: &mut EditorSession,
     canvas: &mut Canvas,
     mouse: AppPointerEvent,
     color: RgbColor,
-    options: PointerOptions,
 ) -> EditorPointerDispatch {
     let canvas_pos = editor.canvas_pos_for_pointer(mouse.column, mouse.row, canvas);
 
     if editor.floating.is_some() {
         match mouse.kind {
             AppPointerKind::Moved => {
-                if !options.track_hover {
-                    return EditorPointerDispatch::default();
-                }
                 if let Some(pos) = canvas_pos {
                     editor.cursor = pos;
                     return EditorPointerDispatch::consumed();
@@ -1783,12 +1761,12 @@ mod tests {
         cut_selection_or_cell, delete_at_cursor, diff_canvas_op, dismiss_floating, draw_border,
         draw_selection_border, export_selection_as_text, export_system_clipboard_text,
         fill_selection, fill_selection_or_cell, handle_editor_action, handle_editor_key_press,
-        handle_editor_pointer, handle_editor_pointer_with, insert_char, paint_floating_drag,
-        paste_primary_swatch, paste_text_block, smart_fill, smart_fill_glyph, stamp_clipboard,
+        handle_editor_pointer, insert_char, paint_floating_drag, paste_primary_swatch,
+        paste_text_block, smart_fill, smart_fill_glyph, stamp_clipboard,
         transpose_selection_corner, AppKey, AppKeyCode, AppModifiers, AppPointerButton,
         AppPointerEvent, AppPointerKind, Bounds, Clipboard, EditorAction, EditorKeyDispatch,
-        EditorSession, FloatingSelection, HostEffect, Mode, MoveDir, PointerOptions,
-        PointerOutcome, PointerStrokeHint, Selection, SelectionShape, SwatchActivation, Viewport,
+        EditorSession, FloatingSelection, HostEffect, Mode, MoveDir, PointerOutcome,
+        PointerStrokeHint, Selection, SelectionShape, SwatchActivation, Viewport,
     };
     use dartboard_core::{Canvas, CanvasOp, CellValue, Pos, RgbColor};
 
@@ -2741,31 +2719,6 @@ mod tests {
 
         assert_eq!(dispatch.outcome, PointerOutcome::Consumed);
         assert_eq!(editor.cursor, Pos { x: 4, y: 2 });
-    }
-
-    #[test]
-    fn pointer_floating_hover_suppressed_when_track_hover_disabled() {
-        let mut canvas = Canvas::with_size(8, 4);
-        let mut editor = viewport_editor(&canvas);
-        let initial_cursor = editor.cursor;
-        editor.floating = Some(FloatingSelection {
-            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('x'))]),
-            transparent: false,
-            source_index: None,
-        });
-
-        let dispatch = handle_editor_pointer_with(
-            &mut editor,
-            &mut canvas,
-            pointer(4, 2, AppPointerKind::Moved),
-            RgbColor::new(0, 0, 0),
-            PointerOptions {
-                track_hover: false,
-            },
-        );
-
-        assert_eq!(dispatch.outcome, PointerOutcome::Passthrough);
-        assert_eq!(editor.cursor, initial_cursor);
     }
 
     #[test]
