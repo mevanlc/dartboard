@@ -77,7 +77,7 @@ jobs:
           cargo_toml = Path("Cargo.toml")
           original = cargo_toml.read_text()
           updated, count = re.subn(
-              r'(?m)^version\s*=\s*"0\.0\.0"$',
+              r'version\s*=\s*"0\.0\.0"',
               f'version = "{release_version}"',
               original,
           )
