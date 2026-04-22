@@ -114,7 +114,7 @@ jobs:
             fi
 
             for attempt in $(seq 1 20); do
-              if cargo publish --dry-run --locked -p "$package"; then
+              if cargo publish --allow-dirty --dry-run --locked -p "$package"; then
                 break
               fi
 
@@ -126,7 +126,7 @@ jobs:
               sleep 15
             done
 
-            cargo publish --locked -p "$package"
+            cargo publish --allow-dirty --locked -p "$package"
             sleep 30
           }
 
