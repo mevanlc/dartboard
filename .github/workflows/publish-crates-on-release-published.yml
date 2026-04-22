@@ -5,6 +5,11 @@ on:
     types:
       - published
   workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to stamp into Cargo.toml for this run (for example 0.1.2)
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,10 +26,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Validate release tag matches workspace version
+      - name: Validate manifest placeholder
         shell: bash
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           CARGO_VERSION=$(
             awk '
               /^\[workspace\.package\]$/ { in_section = 1; next }
@@ -42,15 +46,54 @@ jobs:
             exit 1
           fi
 
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Release tag version ($TAG_VERSION) doesn't match Cargo.toml ($CARGO_VERSION)"
+          if [ "$CARGO_VERSION" != "0.0.0" ]; then
+            echo "::error::Expected Cargo.toml to remain at placeholder version 0.0.0, found $CARGO_VERSION"
             exit 1
           fi
 
-          echo "Version validated: $TAG_VERSION"
+          echo "Manifest placeholder validated: $CARGO_VERSION"
+
+      - name: Resolve release version
+        id: resolve-version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.event_name == 'release' && github.ref_name || inputs.version }}
+        run: |
+          RAW_VERSION="$RELEASE_VERSION"
+          RELEASE_VERSION="${RAW_VERSION#v}"
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release version must match X.Y.Z; got '$RAW_VERSION'"
+            exit 1
+          fi
+
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          release_version = os.environ["RELEASE_VERSION"]
+          cargo_toml = Path("Cargo.toml")
+          original = cargo_toml.read_text()
+          updated, count = re.subn(
+              r'(?m)^version\s*=\s*"0\.0\.0"$',
+              f'version = "{release_version}"',
+              original,
+          )
+          expected = 8
+          if count != expected:
+              raise SystemExit(
+                  f"Expected exactly {expected} placeholder version entries in Cargo.toml, found {count}"
+              )
+          cargo_toml.write_text(updated)
+          PY
+          cargo update --workspace
 
       - name: Publish crates to crates.io
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.resolve-version.outputs.release_version }}
         run: |
           crate_version_exists() {
             local package="$1"
@@ -87,10 +130,13 @@ jobs:
             sleep 30
           }
 
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="$RELEASE_VERSION"
 
           verify_then_publish dartboard-core "$VERSION"
           verify_then_publish dartboard-picker-core "$VERSION"
           verify_then_publish dartboard-editor "$VERSION"
           verify_then_publish dartboard-local "$VERSION"
+          verify_then_publish dartboard-client-ws "$VERSION"
           verify_then_publish dartboard-tui "$VERSION"
+          verify_then_publish dartboard-server "$VERSION"
+          verify_then_publish dartboard-cli "$VERSION"

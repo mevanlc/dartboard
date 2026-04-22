@@ -13,7 +13,7 @@ pub const FLOAT_BG: Color = Color::Rgb(32, 48, 64);
 
 pub const PLAYER_PALETTE: [RgbColor; 9] = [
     RgbColor::new(255, 110, 64),
-    RgbColor::new(255, 196, 64),
+    RgbColor::new(255, 236, 96),
     RgbColor::new(145, 226, 88),
     RgbColor::new(72, 220, 170),
     RgbColor::new(84, 196, 255),

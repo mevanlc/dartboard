@@ -12,17 +12,17 @@ use std::sync::{Arc, Mutex};
 use dartboard_core::{
     Canvas, CanvasOp, Client, ClientMsg, ClientOpId, Peer, RgbColor, Seq, ServerMsg, UserId,
 };
+use rand::seq::SliceRandom;
 
 pub mod store;
 
 pub use store::{CanvasStore, InMemStore};
 
-/// Candidate colors offered to joining users whose requested color collides
-/// with one already in use. Kept in sync with the client-side palette in
+/// Candidate player colors. Kept in sync with the client-side palette in
 /// `dartboard/src/theme.rs`.
 const PLAYER_PALETTE: [RgbColor; 9] = [
     RgbColor::new(255, 110, 64),
-    RgbColor::new(255, 196, 64),
+    RgbColor::new(255, 236, 96),
     RgbColor::new(145, 226, 88),
     RgbColor::new(72, 220, 170),
     RgbColor::new(84, 196, 255),
@@ -36,15 +36,32 @@ const PLAYER_PALETTE: [RgbColor; 9] = [
 /// length so the seat cap preserves unique per-user colors.
 pub const MAX_PLAYERS: usize = PLAYER_PALETTE.len();
 
-fn resolve_user_color(requested: RgbColor, used: &[RgbColor]) -> RgbColor {
-    if !used.contains(&requested) {
-        return requested;
-    }
-    PLAYER_PALETTE
+/// Policy for assigning per-user colors on connect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ColorSelectionMode {
+    /// Workspace default color-selection policy.
+    #[default]
+    Default,
+    /// Assign a color uniformly from the palette entries not currently in use.
+    RandomUnique,
+}
+
+fn select_user_color(mode: ColorSelectionMode, used: &[RgbColor]) -> RgbColor {
+    let available: Vec<_> = PLAYER_PALETTE
         .iter()
         .copied()
-        .find(|c| !used.contains(c))
-        .unwrap_or(requested)
+        .filter(|color| !used.contains(color))
+        .collect();
+    debug_assert!(
+        !available.is_empty(),
+        "color selection requires an unused palette slot"
+    );
+
+    match mode {
+        ColorSelectionMode::Default | ColorSelectionMode::RandomUnique => *available
+            .choose(&mut rand::thread_rng())
+            .expect("unused color should exist before reaching MAX_PLAYERS"),
+    }
 }
 
 /// Minimal transport-facing sink used by the server to fan out [`ServerMsg`]s.
@@ -67,6 +84,7 @@ struct State {
     canvas: Canvas,
     seq: Seq,
     next_user_id: UserId,
+    color_selection_mode: ColorSelectionMode,
     clients: Vec<ClientEntry>,
     store: Box<dyn CanvasStore>,
 }
@@ -84,8 +102,9 @@ impl ServerSink for LocalSink {
     }
 }
 
-/// Introductory payload a client sends before any ops. Name + color are
-/// echoed back to peers via PeerJoined.
+/// Introductory payload a client sends before any ops. Name is echoed back to
+/// peers; color is a transport-level hint and may be replaced by the server's
+/// configured [`ColorSelectionMode`].
 #[derive(Debug, Clone)]
 pub struct Hello {
     pub name: String,
@@ -101,12 +120,20 @@ pub enum ConnectOutcome {
 
 impl ServerHandle {
     pub fn spawn_local<S: CanvasStore + 'static>(store: S) -> Self {
+        Self::spawn_local_with_color_selection_mode(store, ColorSelectionMode::default())
+    }
+
+    pub fn spawn_local_with_color_selection_mode<S: CanvasStore + 'static>(
+        store: S,
+        color_selection_mode: ColorSelectionMode,
+    ) -> Self {
         let canvas = store.load().unwrap_or_default();
         let inner = Arc::new(ServerInner {
             state: Mutex::new(State {
                 canvas,
                 seq: 0,
                 next_user_id: 1,
+                color_selection_mode,
                 clients: Vec::new(),
                 store: Box::new(store),
             }),
@@ -158,7 +185,7 @@ impl ServerHandle {
         state.next_user_id += 1;
 
         let used_colors: Vec<RgbColor> = state.clients.iter().map(|c| c.peer.color).collect();
-        let color = resolve_user_color(hello.color, &used_colors);
+        let color = select_user_color(state.color_selection_mode, &used_colors);
 
         let peer = Peer {
             user_id,
@@ -419,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn colliding_color_gets_remapped_to_unused_palette_entry() {
+    fn joining_players_get_unique_colors_from_palette() {
         let server = ServerHandle::spawn_local(InMemStore);
         let mut alice = server.connect_local(Hello {
             name: "alice".into(),
@@ -434,20 +461,19 @@ mod tests {
             Some(ServerMsg::Welcome { your_color, .. }) => your_color,
             other => panic!("expected Welcome, got {:?}", other),
         };
-        assert_eq!(alice_color, red());
+        assert!(PLAYER_PALETTE.contains(&alice_color));
 
         let bob_color = match drain_events(&mut bob).into_iter().next() {
             Some(ServerMsg::Welcome { your_color, .. }) => your_color,
             other => panic!("expected Welcome, got {:?}", other),
         };
         assert_ne!(
-            bob_color,
-            red(),
-            "bob should not have kept the colliding color"
+            bob_color, alice_color,
+            "players should never collide while free palette slots remain"
         );
         assert!(
             PLAYER_PALETTE.contains(&bob_color),
-            "remapped color {:?} should come from the palette",
+            "assigned color {:?} should come from the palette",
             bob_color
         );
     }

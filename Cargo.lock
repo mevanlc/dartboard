@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "dartboard-cli"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "crossterm",
  "dartboard-client-ws",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "dartboard-client-ws"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "dartboard-core",
  "futures-util",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "dartboard-core"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -281,21 +281,22 @@ dependencies = [
 
 [[package]]
 name = "dartboard-editor"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "dartboard-core",
 ]
 
 [[package]]
 name = "dartboard-local"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "dartboard-core",
+ "rand",
 ]
 
 [[package]]
 name = "dartboard-picker-core"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "emojis",
  "serde_json",
@@ -304,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "dartboard-server"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "dartboard-client-ws",
  "dartboard-core",
@@ -317,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "dartboard-tui"
-version = "0.1.1"
+version = "0.0.0"
 dependencies = [
  "dartboard-core",
  "ratatui",

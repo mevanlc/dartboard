@@ -8,7 +8,7 @@
 use dartboard_core::{Canvas, CanvasOp, ClientOpId, UserId};
 
 pub use dartboard_local::{
-    CanvasStore, ConnectOutcome, Hello, InMemStore, LocalClient, MAX_PLAYERS,
+    CanvasStore, ColorSelectionMode, ConnectOutcome, Hello, InMemStore, LocalClient, MAX_PLAYERS,
 };
 
 mod ws;
@@ -20,8 +20,18 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     pub fn spawn_local<S: CanvasStore + 'static>(store: S) -> Self {
+        Self::spawn_local_with_color_selection_mode(store, ColorSelectionMode::default())
+    }
+
+    pub fn spawn_local_with_color_selection_mode<S: CanvasStore + 'static>(
+        store: S,
+        color_selection_mode: ColorSelectionMode,
+    ) -> Self {
         Self {
-            local: dartboard_local::ServerHandle::spawn_local(store),
+            local: dartboard_local::ServerHandle::spawn_local_with_color_selection_mode(
+                store,
+                color_selection_mode,
+            ),
         }
     }
 
