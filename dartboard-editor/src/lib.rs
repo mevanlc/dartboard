@@ -643,7 +643,7 @@ impl EditorSession {
         );
         queue.truncate(unpinned_slots.len());
 
-        for (slot_idx, swatch) in unpinned_slots.iter().zip(queue.into_iter()) {
+        for (slot_idx, swatch) in unpinned_slots.iter().zip(queue) {
             self.swatches[*slot_idx] = Some(swatch);
         }
     }
