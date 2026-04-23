@@ -1,0 +1,206 @@
+name: Publish Release And Crates On Tag
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Validate manifest placeholder
+        shell: bash
+        run: |
+          CARGO_VERSION=$(
+            awk '
+              /^\[workspace\.package\]$/ { in_section = 1; next }
+              /^\[/ { in_section = 0 }
+              in_section && $1 == "version" && $2 == "=" {
+                gsub(/"/, "", $3)
+                print $3
+                exit
+              }
+            ' Cargo.toml
+          )
+
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "::error::Could not find [workspace.package].version in Cargo.toml"
+            exit 1
+          fi
+
+          if [ "$CARGO_VERSION" != "0.0.0" ]; then
+            echo "::error::Expected Cargo.toml to remain at placeholder version 0.0.0, found $CARGO_VERSION"
+            exit 1
+          fi
+
+          echo "Manifest placeholder validated: $CARGO_VERSION"
+
+      - name: Resolve release version
+        id: resolve-version
+        shell: bash
+        run: |
+          RAW_VERSION="$GITHUB_REF_NAME"
+          RELEASE_VERSION="${RAW_VERSION#v}"
+
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release version must match X.Y.Z; got '$RAW_VERSION'"
+            exit 1
+          fi
+
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: $RELEASE_VERSION"
+
+      - name: Stamp workspace version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.resolve-version.outputs.release_version }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          release_version = os.environ["RELEASE_VERSION"]
+          cargo_toml = Path("Cargo.toml")
+          original = cargo_toml.read_text()
+          updated, count = re.subn(
+              r'version\s*=\s*"0\.0\.0"',
+              f'version = "{release_version}"',
+              original,
+          )
+          expected = 8
+          if count != expected:
+              raise SystemExit(
+                  f"Expected exactly {expected} placeholder version entries in Cargo.toml, found {count}"
+              )
+          cargo_toml.write_text(updated)
+          PY
+          cargo update --workspace
+
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt --all --check
+
+      - name: Check clippy
+        shell: bash
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Verify crates publish dry-run
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.resolve-version.outputs.release_version }}
+        run: |
+          crate_version_exists() {
+            local package="$1"
+            local version="$2"
+            local url="https://crates.io/api/v1/crates/${package}/${version}"
+            local status
+            status=$(curl -sS -o /dev/null -w "%{http_code}" -A "dartboard-publish-ci" "$url" || true)
+            [ "$status" = "200" ]
+          }
+
+          verify_publishable() {
+            local package="$1"
+            local version="$2"
+
+            if crate_version_exists "$package" "$version"; then
+              echo "Skipping $package $version because it is already on crates.io"
+              return 0
+            fi
+
+            for attempt in $(seq 1 20); do
+              if cargo publish --allow-dirty --dry-run --locked -p "$package"; then
+                return 0
+              fi
+
+              if [ "$attempt" -eq 20 ]; then
+                echo "::error::Dry-run verification failed for $package after $attempt attempts"
+                exit 1
+              fi
+
+              sleep 15
+            done
+          }
+
+          VERSION="$RELEASE_VERSION"
+
+          verify_publishable dartboard-core "$VERSION"
+          verify_publishable dartboard-picker-core "$VERSION"
+          verify_publishable dartboard-editor "$VERSION"
+          verify_publishable dartboard-local "$VERSION"
+          verify_publishable dartboard-client-ws "$VERSION"
+          verify_publishable dartboard-tui "$VERSION"
+          verify_publishable dartboard-server "$VERSION"
+          verify_publishable dartboard-cli "$VERSION"
+
+      - name: Create published release
+        id: create_release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"
+
+      - name: Publish crates to crates.io
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.resolve-version.outputs.release_version }}
+        run: |
+          crate_version_exists() {
+            local package="$1"
+            local version="$2"
+            local url="https://crates.io/api/v1/crates/${package}/${version}"
+            local status
+            status=$(curl -sS -o /dev/null -w "%{http_code}" -A "dartboard-publish-ci" "$url" || true)
+            [ "$status" = "200" ]
+          }
+
+          publish_if_needed() {
+            local package="$1"
+            local version="$2"
+
+            if crate_version_exists "$package" "$version"; then
+              echo "Skipping $package $version because it is already on crates.io"
+              return 0
+            fi
+
+            cargo publish --allow-dirty --locked -p "$package"
+            sleep 30
+          }
+
+          VERSION="$RELEASE_VERSION"
+
+          publish_if_needed dartboard-core "$VERSION"
+          publish_if_needed dartboard-picker-core "$VERSION"
+          publish_if_needed dartboard-editor "$VERSION"
+          publish_if_needed dartboard-local "$VERSION"
+          publish_if_needed dartboard-client-ws "$VERSION"
+          publish_if_needed dartboard-tui "$VERSION"
+          publish_if_needed dartboard-server "$VERSION"
+          publish_if_needed dartboard-cli "$VERSION"
+
+      - name: Delete release if publish phase fails
+        if: failure() && steps.create_release.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release delete "$GITHUB_REF_NAME" --yes; then
+            echo "::warning::Failed to delete GitHub release $GITHUB_REF_NAME after publish failure"
+          fi
