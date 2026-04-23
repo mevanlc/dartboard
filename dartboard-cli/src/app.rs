@@ -915,20 +915,18 @@ impl App {
                 self.emoji_picker_state.scroll_offset = 0;
                 self.emoji_picker_state.last_click = None;
             }
-            AppKeyCode::Backspace => {
-                if self.emoji_picker_state.search_cursor > 0 {
-                    let byte_pos = self
-                        .emoji_picker_state
-                        .search_query
-                        .char_indices()
-                        .nth(self.emoji_picker_state.search_cursor - 1)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.emoji_picker_state.search_query.remove(byte_pos);
-                    self.emoji_picker_state.search_cursor -= 1;
-                    self.emoji_picker_state.selected_index = 0;
-                    self.emoji_picker_state.scroll_offset = 0;
-                }
+            AppKeyCode::Backspace if self.emoji_picker_state.search_cursor > 0 => {
+                let byte_pos = self
+                    .emoji_picker_state
+                    .search_query
+                    .char_indices()
+                    .nth(self.emoji_picker_state.search_cursor - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.emoji_picker_state.search_query.remove(byte_pos);
+                self.emoji_picker_state.search_cursor -= 1;
+                self.emoji_picker_state.selected_index = 0;
+                self.emoji_picker_state.scroll_offset = 0;
             }
             AppKeyCode::Left => {
                 self.emoji_picker_state.search_cursor =
