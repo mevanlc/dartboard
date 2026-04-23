@@ -99,54 +99,6 @@ jobs:
         shell: bash
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Verify crates publish dry-run
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ steps.resolve-version.outputs.release_version }}
-        run: |
-          crate_version_exists() {
-            local package="$1"
-            local version="$2"
-            local url="https://crates.io/api/v1/crates/${package}/${version}"
-            local status
-            status=$(curl -sS -o /dev/null -w "%{http_code}" -A "dartboard-publish-ci" "$url" || true)
-            [ "$status" = "200" ]
-          }
-
-          verify_publishable() {
-            local package="$1"
-            local version="$2"
-
-            if crate_version_exists "$package" "$version"; then
-              echo "Skipping $package $version because it is already on crates.io"
-              return 0
-            fi
-
-            for attempt in $(seq 1 20); do
-              if cargo publish --allow-dirty --dry-run --locked -p "$package"; then
-                return 0
-              fi
-
-              if [ "$attempt" -eq 20 ]; then
-                echo "::error::Dry-run verification failed for $package after $attempt attempts"
-                exit 1
-              fi
-
-              sleep 15
-            done
-          }
-
-          VERSION="$RELEASE_VERSION"
-
-          verify_publishable dartboard-core "$VERSION"
-          verify_publishable dartboard-picker-core "$VERSION"
-          verify_publishable dartboard-editor "$VERSION"
-          verify_publishable dartboard-local "$VERSION"
-          verify_publishable dartboard-client-ws "$VERSION"
-          verify_publishable dartboard-tui "$VERSION"
-          verify_publishable dartboard-server "$VERSION"
-          verify_publishable dartboard-cli "$VERSION"
-
       - name: Create published release
         id: create_release
         shell: bash
@@ -171,7 +123,7 @@ jobs:
             [ "$status" = "200" ]
           }
 
-          publish_if_needed() {
+          verify_then_publish() {
             local package="$1"
             local version="$2"
 
@@ -180,20 +132,33 @@ jobs:
               return 0
             fi
 
+            for attempt in $(seq 1 20); do
+              if cargo publish --allow-dirty --dry-run --locked -p "$package"; then
+                break
+              fi
+
+              if [ "$attempt" -eq 20 ]; then
+                echo "::error::Dry-run verification failed for $package after $attempt attempts"
+                exit 1
+              fi
+
+              sleep 15
+            done
+
             cargo publish --allow-dirty --locked -p "$package"
             sleep 30
           }
 
           VERSION="$RELEASE_VERSION"
 
-          publish_if_needed dartboard-core "$VERSION"
-          publish_if_needed dartboard-picker-core "$VERSION"
-          publish_if_needed dartboard-editor "$VERSION"
-          publish_if_needed dartboard-local "$VERSION"
-          publish_if_needed dartboard-client-ws "$VERSION"
-          publish_if_needed dartboard-tui "$VERSION"
-          publish_if_needed dartboard-server "$VERSION"
-          publish_if_needed dartboard-cli "$VERSION"
+          verify_then_publish dartboard-core "$VERSION"
+          verify_then_publish dartboard-picker-core "$VERSION"
+          verify_then_publish dartboard-editor "$VERSION"
+          verify_then_publish dartboard-local "$VERSION"
+          verify_then_publish dartboard-client-ws "$VERSION"
+          verify_then_publish dartboard-tui "$VERSION"
+          verify_then_publish dartboard-server "$VERSION"
+          verify_then_publish dartboard-cli "$VERSION"
 
       - name: Delete release if publish phase fails
         if: failure() && steps.create_release.outcome == 'success'
