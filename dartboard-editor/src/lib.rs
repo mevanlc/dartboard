@@ -750,7 +750,12 @@ pub fn diff_canvas_op(before: &Canvas, after: &Canvas, default_fg: RgbColor) -> 
                     fg: a_fg.unwrap_or(default_fg),
                 });
             }
-            _ => writes.push(CellWrite::Clear { pos }),
+            Some(CellValue::WideCont) => {
+                // A continuation-only change is implied by the wide glyph paint at
+                // its origin. Emitting a clear here would clear that new glyph
+                // when the op is replayed.
+            }
+            None => writes.push(CellWrite::Clear { pos }),
         }
     }
 
@@ -1958,6 +1963,31 @@ mod tests {
             CanvasOp::PaintCell { fg, .. } => assert_eq!(fg, RgbColor::new(9, 8, 7)),
             other => panic!("expected PaintCell, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn diff_canvas_op_wide_insert_left_of_filled_cell_replays_cleanly() {
+        let mut before = Canvas::with_size(5, 1);
+        before.set_colored(Pos { x: 1, y: 0 }, 'A', RgbColor::new(1, 2, 3));
+
+        let mut after = before.clone();
+        let _ = after.put_glyph_colored(Pos { x: 0, y: 0 }, '👍', RgbColor::new(4, 5, 6));
+
+        let op = diff_canvas_op(&before, &after, RgbColor::new(4, 5, 6)).expect("wide insert op");
+        let mut replay = before.clone();
+        replay.apply(&op);
+
+        assert_eq!(
+            op,
+            CanvasOp::PaintCell {
+                pos: Pos { x: 0, y: 0 },
+                ch: '👍',
+                fg: RgbColor::new(4, 5, 6),
+            }
+        );
+        assert_eq!(replay, after);
+        assert_eq!(replay.get(Pos { x: 0, y: 0 }), '👍');
+        assert_eq!(replay.cell(Pos { x: 1, y: 0 }), Some(CellValue::WideCont));
     }
 
     #[test]
