@@ -1,6 +1,24 @@
 mod nerd_fonts;
 pub mod sources;
 
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::mem::size_of;
+
+/// Lowercase `query` only when it actually contains ASCII uppercase or any
+/// non-ASCII bytes. Pure-ASCII-lowercase queries — the common case for this
+/// picker — borrow instead of allocating.
+fn lowercased_query(query: &str) -> Cow<'_, str> {
+    let needs_fold = query
+        .bytes()
+        .any(|b| b.is_ascii_uppercase() || !b.is_ascii());
+    if needs_fold {
+        Cow::Owned(query.to_lowercase())
+    } else {
+        Cow::Borrowed(query)
+    }
+}
+
 #[derive(Clone)]
 pub struct IconEntry {
     pub icon: String,
@@ -28,6 +46,12 @@ impl IconEntry {
         } else {
             None
         }
+    }
+
+    /// Heap bytes owned by this entry (string capacities; does not include the
+    /// `size_of::<IconEntry>()` stack fields).
+    pub fn heap_footprint(&self) -> usize {
+        self.icon.capacity() + self.name.capacity() + self.name_lower.capacity()
     }
 }
 
@@ -96,6 +120,27 @@ impl IconCatalogData {
         self.tabs.len()
     }
 
+    pub fn tabs(&self) -> &[Vec<SectionSpec>] {
+        &self.tabs
+    }
+
+    /// Estimate heap bytes owned by the catalog. Sums string and Vec
+    /// capacities; does not account for allocator overhead.
+    pub fn heap_footprint(&self) -> usize {
+        let mut total = self.tabs.capacity() * size_of::<Vec<SectionSpec>>();
+        for tab in &self.tabs {
+            total += tab.capacity() * size_of::<SectionSpec>();
+            for spec in tab {
+                total += spec.title.capacity();
+                total += spec.entries.capacity() * size_of::<IconEntry>();
+                for entry in &spec.entries {
+                    total += entry.heap_footprint();
+                }
+            }
+        }
+        total
+    }
+
     /// Return section views for the given tab, filtered by `query`. Empty
     /// sections are dropped so lone headers don't appear. Out-of-range
     /// `tab_idx` yields an empty Vec.
@@ -103,10 +148,11 @@ impl IconCatalogData {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return Vec::new();
         };
-        let query_lower = query.to_lowercase();
+        let query_lower = lowercased_query(query);
+        let q = query_lower.as_ref();
         let mut out = Vec::new();
         for spec in tab {
-            if query_lower.is_empty() {
+            if q.is_empty() {
                 if spec.entries.is_empty() {
                     continue;
                 }
@@ -118,7 +164,7 @@ impl IconCatalogData {
                 let filtered: Vec<&IconEntry> = spec
                     .entries
                     .iter()
-                    .filter(|e| e.name_lower.contains(&query_lower))
+                    .filter(|e| e.name_lower.contains(q))
                     .collect();
                 if filtered.is_empty() {
                     continue;
@@ -197,6 +243,215 @@ pub fn adjust_scroll_offset(current: usize, visible: usize, flat_idx: usize) -> 
         flat_idx.saturating_sub(visible - 1)
     } else {
         current
+    }
+}
+
+/// Wraps an [`IconCatalogData`] with a **trail-stack** cache: each successful
+/// narrowing step pushes a new entry whose query is a strict extension of the
+/// previous. Lookups pop entries whose query is not a prefix of the new query
+/// (which handles backspaces naturally — the stack rewinds to the matching
+/// prefix) and either return an exact hit, narrow from the longest cached
+/// prefix, or fall all the way back to a cold scan.
+///
+/// Empty queries bypass the cache since the no-filter path already returns
+/// borrowed slices. Tab switches invalidate the trail entirely.
+pub struct MemoizedCatalog {
+    inner: IconCatalogData,
+    cache: RefCell<CacheState>,
+}
+
+#[derive(Default)]
+struct CacheState {
+    /// Which tab the current trail belongs to. A tab switch resets the trail.
+    tab_idx: Option<usize>,
+    /// Successive narrowings. Invariant: each entry's query strictly extends
+    /// the previous entry's query.
+    trail: Vec<CachedQuery>,
+}
+
+struct CachedQuery {
+    query: String,
+    sections: Vec<CachedSection>,
+}
+
+struct CachedSection {
+    section_idx: u32,
+    entries: Vec<u32>,
+}
+
+/// Soft cap on trail depth. Real human queries never get close; this only
+/// matters to bound memory if something weird is happening.
+const TRAIL_CAP: usize = 64;
+
+impl MemoizedCatalog {
+    pub fn new(inner: IconCatalogData) -> Self {
+        Self {
+            inner,
+            cache: RefCell::default(),
+        }
+    }
+
+    pub fn inner(&self) -> &IconCatalogData {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> IconCatalogData {
+        self.inner
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.inner.tab_count()
+    }
+
+    /// Clear the memoization cache. Useful if the underlying catalog is ever
+    /// mutated (not currently exposed, but kept for symmetry).
+    pub fn invalidate(&self) {
+        let mut cache = self.cache.borrow_mut();
+        cache.tab_idx = None;
+        cache.trail.clear();
+    }
+
+    /// Heap bytes owned by the catalog plus the cache state.
+    pub fn heap_footprint(&self) -> usize {
+        let cache = self.cache.borrow();
+        let mut total = self.inner.heap_footprint();
+        total += cache.trail.capacity() * size_of::<CachedQuery>();
+        for step in &cache.trail {
+            total += step.query.capacity();
+            total += step.sections.capacity() * size_of::<CachedSection>();
+            for section in &step.sections {
+                total += section.entries.capacity() * size_of::<u32>();
+            }
+        }
+        total
+    }
+
+    /// Filtered section views for `(tab_idx, query)`. Semantically identical
+    /// to [`IconCatalogData::sections`] but reuses prior narrowing steps.
+    pub fn sections(&self, tab_idx: usize, query: &str) -> Vec<SectionView<'_>> {
+        // Empty-query path: no filter needed, borrowed slices only. Don't
+        // mutate the trail — the user is likely mid-edit and will extend or
+        // re-type.
+        if query.is_empty() {
+            return self.inner.sections(tab_idx, "");
+        }
+
+        let Some(tab) = self.inner.tabs.get(tab_idx) else {
+            return Vec::new();
+        };
+
+        let query_lower = lowercased_query(query);
+        let q = query_lower.as_ref();
+        let layout: Vec<(usize, Vec<u32>)> = {
+            let mut cache = self.cache.borrow_mut();
+
+            // Tab switch invalidates the entire trail.
+            if cache.tab_idx != Some(tab_idx) {
+                cache.tab_idx = Some(tab_idx);
+                cache.trail.clear();
+            }
+
+            // Pop any trail entries whose query isn't a prefix of the new
+            // query. After this loop the top (if any) is either an exact
+            // match or the longest cached prefix of `q`. This is the
+            // backspace path.
+            while cache
+                .trail
+                .last()
+                .is_some_and(|top| !q.starts_with(top.query.as_str()))
+            {
+                cache.trail.pop();
+            }
+
+            let top_exact = cache
+                .trail
+                .last()
+                .is_some_and(|top| top.query.as_str() == q);
+
+            if !top_exact {
+                let new_sections = match cache.trail.last() {
+                    Some(top) => {
+                        // Narrow from the longest cached prefix.
+                        top.sections
+                            .iter()
+                            .filter_map(|cached| {
+                                let spec = &tab[cached.section_idx as usize];
+                                let entries: Vec<u32> = cached
+                                    .entries
+                                    .iter()
+                                    .copied()
+                                    .filter(|&i| spec.entries[i as usize].name_lower.contains(q))
+                                    .collect();
+                                (!entries.is_empty()).then_some(CachedSection {
+                                    section_idx: cached.section_idx,
+                                    entries,
+                                })
+                            })
+                            .collect()
+                    }
+                    None => {
+                        // Cold scan — no prior prefix to narrow from.
+                        tab.iter()
+                            .enumerate()
+                            .filter_map(|(section_idx, spec)| {
+                                let entries: Vec<u32> = spec
+                                    .entries
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, entry)| {
+                                        entry.name_lower.contains(q).then_some(i as u32)
+                                    })
+                                    .collect();
+                                (!entries.is_empty()).then_some(CachedSection {
+                                    section_idx: section_idx as u32,
+                                    entries,
+                                })
+                            })
+                            .collect()
+                    }
+                };
+
+                cache.trail.push(CachedQuery {
+                    query: q.to_owned(),
+                    sections: new_sections,
+                });
+
+                // Soft cap — drop the oldest (shortest-prefix) entries first.
+                while cache.trail.len() > TRAIL_CAP {
+                    cache.trail.remove(0);
+                }
+            }
+
+            cache
+                .trail
+                .last()
+                .expect("just pushed or already present")
+                .sections
+                .iter()
+                .map(|c| (c.section_idx as usize, c.entries.clone()))
+                .collect()
+        };
+
+        layout
+            .into_iter()
+            .map(|(section_idx, indices)| {
+                let spec = &tab[section_idx];
+                let entries: Vec<&IconEntry> = indices
+                    .into_iter()
+                    .map(|i| &spec.entries[i as usize])
+                    .collect();
+                SectionView {
+                    title: &spec.title,
+                    entries: SectionEntries::Filtered(entries),
+                }
+            })
+            .collect()
+    }
+}
+
+impl From<IconCatalogData> for MemoizedCatalog {
+    fn from(inner: IconCatalogData) -> Self {
+        Self::new(inner)
     }
 }
 
@@ -285,5 +540,103 @@ mod tests {
         assert_eq!(ascii.single_char(), Some('x'));
         assert_eq!(emoji.single_char(), Some('🔥'));
         assert_eq!(multi.single_char(), None);
+    }
+
+    fn collect_names(sections: &[SectionView<'_>]) -> Vec<String> {
+        let mut out = Vec::new();
+        for s in sections {
+            for i in 0..s.entries.len() {
+                out.push(s.entries.get(i).unwrap().name.clone());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn memoized_matches_raw_across_tabs_and_queries() {
+        let memo = MemoizedCatalog::new(fixture_catalog());
+        for (tab, query) in &[
+            (0, ""),
+            (0, "a"),
+            (0, "arrow"),
+            (0, "zzzzzz"),
+            (1, ""),
+            (1, "anything"),
+            (99, ""),
+        ] {
+            let raw = memo.inner().sections(*tab, query);
+            let cached = memo.sections(*tab, query);
+            assert_eq!(
+                collect_names(&raw),
+                collect_names(&cached),
+                "tab {tab} query {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn memoized_incremental_narrowing_produces_same_result() {
+        let memo = MemoizedCatalog::new(fixture_catalog());
+        // "a" matches a0, a1, b0 arrow, b1 arrow; narrow to "arrow" should
+        // match only b0 arrow and b1 arrow.
+        let warm = memo.sections(0, "a");
+        assert_eq!(
+            collect_names(&warm),
+            vec!["a0", "a1", "b0 arrow", "b1 arrow"]
+        );
+        let narrowed = memo.sections(0, "arrow");
+        assert_eq!(collect_names(&narrowed), vec!["b0 arrow", "b1 arrow"]);
+        // Compare against the un-memoized path to be sure.
+        let reference = memo.inner().sections(0, "arrow");
+        assert_eq!(collect_names(&narrowed), collect_names(&reference));
+    }
+
+    #[test]
+    fn memoized_handles_query_shrink_via_trail_pop() {
+        let memo = MemoizedCatalog::new(fixture_catalog());
+        // Type "a" → "arrow". Now backspace back to "a".
+        let _ = memo.sections(0, "a");
+        let _ = memo.sections(0, "ar");
+        let _ = memo.sections(0, "arrow");
+        let shrunk = memo.sections(0, "a");
+        let reference = memo.inner().sections(0, "a");
+        assert_eq!(collect_names(&shrunk), collect_names(&reference));
+    }
+
+    #[test]
+    fn memoized_handles_cold_shrink_without_trail() {
+        let memo = MemoizedCatalog::new(fixture_catalog());
+        // Jump straight to a long query, then shrink. The trail has only
+        // "arrow"; backspacing to "a" should pop everything and cold-scan.
+        let _ = memo.sections(0, "arrow");
+        let shrunk = memo.sections(0, "a");
+        let reference = memo.inner().sections(0, "a");
+        assert_eq!(collect_names(&shrunk), collect_names(&reference));
+    }
+
+    #[test]
+    fn memoized_tab_switch_invalidates_trail() {
+        let memo = MemoizedCatalog::new(fixture_catalog());
+        let _ = memo.sections(0, "a");
+        // Switch to tab 1 (only has an empty section — everything drops).
+        let other = memo.sections(1, "anything");
+        let reference = memo.inner().sections(1, "anything");
+        assert_eq!(collect_names(&other), collect_names(&reference));
+        // Switch back — must still produce correct results.
+        let back = memo.sections(0, "arrow");
+        let ref2 = memo.inner().sections(0, "arrow");
+        assert_eq!(collect_names(&back), collect_names(&ref2));
+    }
+
+    #[test]
+    fn memoized_non_prefix_edit_discards_trail() {
+        let memo = MemoizedCatalog::new(fixture_catalog());
+        // "arrow" then "b" — "b" isn't a prefix of "arrow", trail pops empty,
+        // cold scan.
+        let _ = memo.sections(0, "a");
+        let _ = memo.sections(0, "arrow");
+        let shifted = memo.sections(0, "b");
+        let reference = memo.inner().sections(0, "b");
+        assert_eq!(collect_names(&shifted), collect_names(&reference));
     }
 }
