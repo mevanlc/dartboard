@@ -388,6 +388,37 @@ mod tests {
     use super::{Canvas, CellValue, Pos, DEFAULT_HEIGHT, DEFAULT_WIDTH};
     use crate::color::RgbColor;
 
+    #[derive(Clone, Copy)]
+    enum RowWrite {
+        Draw(char),
+        Clear,
+    }
+
+    impl RowWrite {
+        fn apply(self, canvas: &mut Canvas, y: usize, x: usize) {
+            match self {
+                Self::Draw(ch) => canvas.set(Pos { x, y }, ch),
+                Self::Clear => canvas.clear(Pos { x, y }),
+            }
+        }
+    }
+
+    fn same_row_cells(
+        canvas: &Canvas,
+        y: usize,
+        min_x: usize,
+        max_x: usize,
+    ) -> Vec<Option<CellValue>> {
+        (min_x..=max_x).map(|x| canvas.cell(Pos { x, y })).collect()
+    }
+
+    fn apply_write_against_wide_glyph(write_x: usize, write: RowWrite) -> Canvas {
+        let mut canvas = Canvas::with_size(8, 1);
+        canvas.set(Pos { x: 3, y: 0 }, '🌱');
+        write.apply(&mut canvas, 0, write_x);
+        canvas
+    }
+
     #[test]
     fn row_push_and_pull_are_directional() {
         let mut canvas = Canvas::new();
@@ -448,6 +479,157 @@ mod tests {
 
         assert_eq!(canvas.get(Pos { x: 1, y: 1 }), ' ');
         assert_eq!(canvas.get(Pos { x: 2, y: 1 }), ' ');
+    }
+
+    #[test]
+    fn glyph_identity_resolves_from_both_halves_of_wide_glyph() {
+        let mut canvas = Canvas::with_size(8, 1);
+        canvas.set(Pos { x: 3, y: 0 }, '🌱');
+
+        assert_eq!(
+            canvas.glyph_origin(Pos { x: 3, y: 0 }),
+            Some(Pos { x: 3, y: 0 })
+        );
+        assert_eq!(
+            canvas.glyph_origin(Pos { x: 4, y: 0 }),
+            Some(Pos { x: 3, y: 0 })
+        );
+        assert_eq!(
+            canvas.glyph_at(Pos { x: 3, y: 0 }),
+            canvas.glyph_at(Pos { x: 4, y: 0 })
+        );
+    }
+
+    #[test]
+    fn narrow_write_left_of_wide_glyph_without_overlap_preserves_it() {
+        let canvas = apply_write_against_wide_glyph(2, RowWrite::Draw('B'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![
+                Some(CellValue::Narrow('B')),
+                Some(CellValue::Wide('🌱')),
+                Some(CellValue::WideCont),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn wide_write_left_of_wide_glyph_replaces_it_when_spans_overlap() {
+        let canvas = apply_write_against_wide_glyph(2, RowWrite::Draw('🌿'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![
+                Some(CellValue::Wide('🌿')),
+                Some(CellValue::WideCont),
+                None,
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_write_at_wide_glyph_origin_replaces_it() {
+        let canvas = apply_write_against_wide_glyph(3, RowWrite::Draw('B'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![None, Some(CellValue::Narrow('B')), None, None,]
+        );
+    }
+
+    #[test]
+    fn wide_write_at_wide_glyph_origin_replaces_it() {
+        let canvas = apply_write_against_wide_glyph(3, RowWrite::Draw('🌿'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![
+                None,
+                Some(CellValue::Wide('🌿')),
+                Some(CellValue::WideCont),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_write_at_wide_glyph_continuation_replaces_it() {
+        let canvas = apply_write_against_wide_glyph(4, RowWrite::Draw('B'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![None, None, Some(CellValue::Narrow('B')), None,]
+        );
+    }
+
+    #[test]
+    fn wide_write_at_wide_glyph_continuation_replaces_it() {
+        let canvas = apply_write_against_wide_glyph(4, RowWrite::Draw('🌿'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 6),
+            vec![
+                None,
+                None,
+                Some(CellValue::Wide('🌿')),
+                Some(CellValue::WideCont),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_write_right_of_wide_glyph_without_overlap_preserves_it() {
+        let canvas = apply_write_against_wide_glyph(5, RowWrite::Draw('B'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![
+                None,
+                Some(CellValue::Wide('🌱')),
+                Some(CellValue::WideCont),
+                Some(CellValue::Narrow('B')),
+            ]
+        );
+    }
+
+    #[test]
+    fn wide_write_right_of_wide_glyph_without_overlap_preserves_it() {
+        let canvas = apply_write_against_wide_glyph(5, RowWrite::Draw('🌿'));
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 6),
+            vec![
+                None,
+                Some(CellValue::Wide('🌱')),
+                Some(CellValue::WideCont),
+                Some(CellValue::Wide('🌿')),
+                Some(CellValue::WideCont),
+            ]
+        );
+    }
+
+    #[test]
+    fn clearing_wide_glyph_origin_removes_both_cells() {
+        let canvas = apply_write_against_wide_glyph(3, RowWrite::Clear);
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![None, None, None, None]
+        );
+    }
+
+    #[test]
+    fn clearing_wide_glyph_continuation_removes_both_cells() {
+        let canvas = apply_write_against_wide_glyph(4, RowWrite::Clear);
+
+        assert_eq!(
+            same_row_cells(&canvas, 0, 2, 5),
+            vec![None, None, None, None]
+        );
     }
 
     #[test]

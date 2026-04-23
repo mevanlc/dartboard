@@ -973,16 +973,31 @@ pub fn capture_bounds(canvas: &Canvas, bounds: Bounds) -> Clipboard {
     Clipboard::new(bounds.width(), bounds.height(), cells)
 }
 
+fn selection_covers_cell(canvas: &Canvas, selection: Selection, pos: Pos) -> bool {
+    if selection.contains(pos) {
+        return true;
+    }
+    let Some(origin) = canvas.glyph_origin(pos) else {
+        return false;
+    };
+    let Some(glyph) = canvas.glyph_at(origin) else {
+        return false;
+    };
+    (0..glyph.width).any(|dx| {
+        selection.contains(Pos {
+            x: origin.x + dx,
+            y: origin.y,
+        })
+    })
+}
+
 pub fn capture_selection(canvas: &Canvas, selection: Selection) -> Clipboard {
     let bounds = selection.bounds().normalized_for_canvas(canvas);
     let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
     for y in bounds.min_y..=bounds.max_y {
         for x in bounds.min_x..=bounds.max_x {
             let pos = Pos { x, y };
-            let include = selection.contains(pos)
-                || canvas
-                    .glyph_origin(pos)
-                    .is_some_and(|origin| selection.contains(origin));
+            let include = selection_covers_cell(canvas, selection, pos);
             cells.push(include.then(|| canvas.cell(pos)).flatten());
         }
     }
@@ -1012,7 +1027,7 @@ pub fn export_selection_as_text(canvas: &Canvas, selection: Selection) -> String
     for y in bounds.min_y..=bounds.max_y {
         for x in bounds.min_x..=bounds.max_x {
             let pos = Pos { x, y };
-            if selection.contains(pos) {
+            if selection_covers_cell(canvas, selection, pos) {
                 match canvas.cell(pos) {
                     Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => text.push(ch),
                     Some(CellValue::WideCont) => {}
@@ -2190,6 +2205,44 @@ mod tests {
         assert_eq!(clipboard.get(1, 1), Some(CellValue::Narrow('E')));
         assert_eq!(clipboard.get(2, 1), Some(CellValue::Narrow('F')));
         assert_eq!(export_selection_as_text(&canvas, selection), "ABC\nDEF");
+    }
+
+    #[test]
+    fn capture_selection_on_wide_glyph_origin_includes_both_cells() {
+        let mut canvas = Canvas::with_size(6, 1);
+        canvas.set(Pos { x: 2, y: 0 }, '🌱');
+        let selection = Selection {
+            anchor: Pos { x: 2, y: 0 },
+            cursor: Pos { x: 2, y: 0 },
+            shape: SelectionShape::Rect,
+        };
+
+        let clipboard = capture_selection(&canvas, selection);
+
+        assert_eq!(clipboard.width, 2);
+        assert_eq!(clipboard.height, 1);
+        assert_eq!(clipboard.get(0, 0), Some(CellValue::Wide('🌱')));
+        assert_eq!(clipboard.get(1, 0), Some(CellValue::WideCont));
+        assert_eq!(export_selection_as_text(&canvas, selection), "🌱");
+    }
+
+    #[test]
+    fn capture_selection_on_wide_glyph_continuation_includes_both_cells() {
+        let mut canvas = Canvas::with_size(6, 1);
+        canvas.set(Pos { x: 2, y: 0 }, '🌱');
+        let selection = Selection {
+            anchor: Pos { x: 3, y: 0 },
+            cursor: Pos { x: 3, y: 0 },
+            shape: SelectionShape::Rect,
+        };
+
+        let clipboard = capture_selection(&canvas, selection);
+
+        assert_eq!(clipboard.width, 2);
+        assert_eq!(clipboard.height, 1);
+        assert_eq!(clipboard.get(0, 0), Some(CellValue::Wide('🌱')));
+        assert_eq!(clipboard.get(1, 0), Some(CellValue::WideCont));
+        assert_eq!(export_selection_as_text(&canvas, selection), "🌱");
     }
 
     #[test]

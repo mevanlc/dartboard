@@ -97,6 +97,24 @@ impl SelectionView {
     }
 }
 
+fn selection_covers_cell(canvas: &Canvas, selection: SelectionView, pos: Pos) -> bool {
+    if selection.contains(pos) {
+        return true;
+    }
+    let Some(origin) = canvas.glyph_origin(pos) else {
+        return false;
+    };
+    let Some(glyph) = canvas.glyph_at(origin) else {
+        return false;
+    };
+    (0..glyph.width).any(|dx| {
+        selection.contains(Pos {
+            x: origin.x + dx,
+            y: origin.y,
+        })
+    })
+}
+
 /// View of a floating selection pinned to `anchor`. Consumers pass a flat
 /// cells slice of length `width * height` (row-major). `None` entries are
 /// rendered as background in opaque mode and skipped in transparent mode.
@@ -194,7 +212,10 @@ impl<'a> Widget for CanvasWidget<'a> {
                     .map(rgb_to_color)
                     .unwrap_or(self.style.default_glyph_fg);
 
-                if selection.map(|s| s.contains(pos)).unwrap_or(false) {
+                if selection
+                    .map(|selection| selection_covers_cell(canvas, selection, pos))
+                    .unwrap_or(false)
+                {
                     cell.set_bg(self.style.selection_bg)
                         .set_fg(self.style.selection_fg);
                     if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
@@ -320,6 +341,44 @@ mod tests {
         assert_eq!(buf[(2, 2)].bg, style.selection_bg);
         assert_ne!(buf[(0, 0)].bg, style.selection_bg);
         assert_ne!(buf[(3, 3)].bg, style.selection_bg);
+    }
+
+    #[test]
+    fn selection_highlights_both_halves_when_wide_origin_is_selected() {
+        let mut canvas = blank_canvas(6, 1);
+        canvas.set(Pos { x: 2, y: 0 }, '🌱');
+        let state = CanvasWidgetState::new(&canvas, Pos { x: 0, y: 0 }).selection(SelectionView {
+            anchor: Pos { x: 2, y: 0 },
+            cursor: Pos { x: 2, y: 0 },
+            shape: SelectionShape::Rect,
+        });
+        let widget = CanvasWidget::new(&state);
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let style = CanvasStyle::default();
+        assert_eq!(buf[(2, 0)].bg, style.selection_bg);
+        assert_eq!(buf[(3, 0)].bg, style.selection_bg);
+    }
+
+    #[test]
+    fn selection_highlights_both_halves_when_wide_continuation_is_selected() {
+        let mut canvas = blank_canvas(6, 1);
+        canvas.set(Pos { x: 2, y: 0 }, '🌱');
+        let state = CanvasWidgetState::new(&canvas, Pos { x: 0, y: 0 }).selection(SelectionView {
+            anchor: Pos { x: 3, y: 0 },
+            cursor: Pos { x: 3, y: 0 },
+            shape: SelectionShape::Rect,
+        });
+        let widget = CanvasWidget::new(&state);
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let style = CanvasStyle::default();
+        assert_eq!(buf[(2, 0)].bg, style.selection_bg);
+        assert_eq!(buf[(3, 0)].bg, style.selection_bg);
     }
 
     #[test]
