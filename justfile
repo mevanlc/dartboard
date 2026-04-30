@@ -39,7 +39,7 @@ serve *ARGS:
 # Install every binary in the workspace to ~/.cargo/bin via cargo install.
 # Uses --locked so the resolver honors Cargo.lock.
 install:
-    cargo install --locked --path dartboard
+    cargo install --locked --path dartboard-cli
     cargo install --locked --path dartboard-server
 
 # Remove the installed binaries from ~/.cargo/bin.
