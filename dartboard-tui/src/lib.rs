@@ -10,7 +10,7 @@
 use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 use ratatui::widgets::Widget;
 
 /// Styling hooks for `CanvasWidget`. Each consumer supplies colors from its
@@ -195,13 +195,22 @@ impl<'a> Widget for CanvasWidget<'a> {
         let selection = self.state.selection;
 
         for dy in 0..area.height {
+            let mut skip_next = false;
             for dx in 0..area.width {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+
+                let screen_x = area.x + dx;
+                let screen_y = area.y + dy;
                 let x = ox + dx as usize;
                 let y = oy + dy as usize;
-                let cell = &mut buf[(area.x + dx, area.y + dy)];
+                let cell = &mut buf[(screen_x, screen_y)];
+                cell.reset();
 
                 if x >= cw || y >= ch {
-                    cell.set_bg(self.style.oob_bg);
+                    cell.set_char(' ').set_bg(self.style.oob_bg);
                     continue;
                 }
 
@@ -212,17 +221,33 @@ impl<'a> Widget for CanvasWidget<'a> {
                     .map(rgb_to_color)
                     .unwrap_or(self.style.default_glyph_fg);
 
-                if selection
+                let selected = selection
                     .map(|selection| selection_covers_cell(canvas, selection, pos))
-                    .unwrap_or(false)
-                {
-                    cell.set_bg(self.style.selection_bg)
-                        .set_fg(self.style.selection_fg);
-                    if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
-                        cell.set_char(ch);
+                    .unwrap_or(false);
+                let cell_style = if selected {
+                    Style::default()
+                        .bg(self.style.selection_bg)
+                        .fg(self.style.selection_fg)
+                } else {
+                    Style::default().fg(glyph_fg)
+                };
+
+                match cell_value {
+                    Some(CellValue::Narrow(ch)) => {
+                        buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
                     }
-                } else if let Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) = cell_value {
-                    cell.set_char(ch).set_fg(glyph_fg);
+                    Some(CellValue::Wide(ch)) => {
+                        buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
+                        if dx + 1 < area.width {
+                            buf[(screen_x + 1, screen_y)].set_style(cell_style);
+                        }
+                        // set_string wrote the wide glyph at dx and an empty
+                        // continuation at dx+1; skip dx+1 so we don't clobber it.
+                        skip_next = true;
+                    }
+                    Some(CellValue::WideCont) | None => {
+                        cell.set_char(' ').set_style(cell_style);
+                    }
                 }
             }
         }
@@ -244,12 +269,13 @@ impl<'a> Widget for CanvasWidget<'a> {
                         continue;
                     }
 
-                    let cell = &mut buf[(area.x + dx, area.y + dy)];
+                    let screen_x = area.x + dx;
+                    let screen_y = area.y + dy;
+                    let cell = &mut buf[(screen_x, screen_y)];
+                    let cell_style = Style::default().bg(self.style.floating_bg).fg(active_fg);
                     match floating.cell(cx, cy) {
                         Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                            cell.set_char(ch)
-                                .set_bg(self.style.floating_bg)
-                                .set_fg(active_fg);
+                            buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
                         }
                         Some(CellValue::WideCont) => {
                             cell.set_bg(self.style.floating_bg);
@@ -321,6 +347,38 @@ mod tests {
 
         // Cell (3, 2) is outside the 2x2 canvas — should be OOB_BG.
         assert_eq!(buf[(3, 2)].bg, CanvasStyle::default().oob_bg);
+    }
+
+    #[test]
+    fn blank_cells_clear_stale_buffer_symbols() {
+        let canvas = blank_canvas(2, 1);
+        let state = CanvasWidgetState::new(&canvas, Pos { x: 0, y: 0 });
+        let widget = CanvasWidget::new(&state);
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(0, 0, "\u{0301}", Style::default().fg(Color::Red));
+        buf.set_string(1, 0, "X", Style::default().bg(Color::Blue));
+
+        widget.render(area, &mut buf);
+
+        assert_eq!(buf[(0, 0)].symbol(), " ");
+        assert_eq!(buf[(1, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn wide_glyph_render_clears_stale_continuation_cell() {
+        let mut canvas = blank_canvas(3, 1);
+        canvas.set(Pos { x: 0, y: 0 }, '🌱');
+        let state = CanvasWidgetState::new(&canvas, Pos { x: 0, y: 0 });
+        let widget = CanvasWidget::new(&state);
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(1, 0, "X", Style::default().fg(Color::Red));
+
+        widget.render(area, &mut buf);
+
+        assert_eq!(buf[(0, 0)].symbol(), "🌱");
+        assert_eq!(buf[(1, 0)].symbol(), " ");
     }
 
     #[test]
