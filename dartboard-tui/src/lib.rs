@@ -7,7 +7,11 @@
 //! etc.) builds its own state per render, similar to how ratatui's
 //! `Paragraph::new(text).style(...)` works.
 
-use dartboard_core::{Canvas, CellValue, Pos, RgbColor};
+use dartboard_core::{
+    constrain_rgb, counterparts_from_ansi16, counterparts_from_rgb, counterparts_from_xterm256,
+    ColorMode, ColorViewMode, RgbColor,
+};
+use dartboard_core::{Canvas, CellValue, Pos};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -27,6 +31,10 @@ pub struct CanvasStyle {
     pub selection_fg: Color,
     /// Background color for cells covered by a floating selection.
     pub floating_bg: Color,
+    /// Terminal color capability to render against.
+    pub color_mode: ColorMode,
+    /// How to handle colors that are not exactly available in `color_mode`.
+    pub color_view_mode: ColorViewMode,
 }
 
 impl Default for CanvasStyle {
@@ -37,6 +45,8 @@ impl Default for CanvasStyle {
             selection_bg: Color::Rgb(64, 40, 24),
             selection_fg: Color::Rgb(208, 166, 89),
             floating_bg: Color::Rgb(32, 48, 64),
+            color_mode: ColorMode::default(),
+            color_view_mode: ColorViewMode::default(),
         }
     }
 }
@@ -123,6 +133,7 @@ pub struct FloatingView<'a> {
     pub width: usize,
     pub height: usize,
     pub cells: &'a [Option<CellValue>],
+    pub colors: Option<&'a [Option<RgbColor>]>,
     pub anchor: Pos,
     pub transparent: bool,
     pub active_color: RgbColor,
@@ -131,6 +142,12 @@ pub struct FloatingView<'a> {
 impl<'a> FloatingView<'a> {
     fn cell(&self, cx: usize, cy: usize) -> Option<CellValue> {
         self.cells[cy * self.width + cx]
+    }
+
+    fn fg(&self, cx: usize, cy: usize) -> RgbColor {
+        self.colors
+            .and_then(|colors| colors[cy * self.width + cx])
+            .unwrap_or(self.active_color)
     }
 }
 
@@ -218,8 +235,21 @@ impl<'a> Widget for CanvasWidget<'a> {
                 let cell_value = canvas.cell(pos);
                 let glyph_fg = canvas
                     .fg(pos)
-                    .map(rgb_to_color)
+                    .and_then(|rgb| {
+                        constrain_rgb_to_color(
+                            rgb,
+                            self.style.color_mode,
+                            self.style.color_view_mode,
+                        )
+                    })
                     .unwrap_or(self.style.default_glyph_fg);
+                let glyph_visible = canvas.fg(pos).is_none()
+                    || constrain_rgb(
+                        canvas.fg(pos).unwrap(),
+                        self.style.color_mode,
+                        self.style.color_view_mode,
+                    )
+                    .is_some();
 
                 let selected = selection
                     .map(|selection| selection_covers_cell(canvas, selection, pos))
@@ -233,10 +263,10 @@ impl<'a> Widget for CanvasWidget<'a> {
                 };
 
                 match cell_value {
-                    Some(CellValue::Narrow(ch)) => {
+                    Some(CellValue::Narrow(ch)) if glyph_visible => {
                         buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
                     }
-                    Some(CellValue::Wide(ch)) => {
+                    Some(CellValue::Wide(ch)) if glyph_visible => {
                         buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
                         if dx + 1 < area.width {
                             buf[(screen_x + 1, screen_y)].set_style(cell_style);
@@ -245,7 +275,8 @@ impl<'a> Widget for CanvasWidget<'a> {
                         // continuation at dx+1; skip dx+1 so we don't clobber it.
                         skip_next = true;
                     }
-                    Some(CellValue::WideCont) | None => {
+                    Some(CellValue::Narrow(_) | CellValue::Wide(_) | CellValue::WideCont)
+                    | None => {
                         cell.set_char(' ').set_style(cell_style);
                     }
                 }
@@ -253,7 +284,6 @@ impl<'a> Widget for CanvasWidget<'a> {
         }
 
         if let Some(floating) = self.state.floating {
-            let active_fg = rgb_to_color(floating.active_color);
             for cy in 0..floating.height {
                 for cx in 0..floating.width {
                     let canvas_x = floating.anchor.x + cx;
@@ -272,10 +302,23 @@ impl<'a> Widget for CanvasWidget<'a> {
                     let screen_x = area.x + dx;
                     let screen_y = area.y + dy;
                     let cell = &mut buf[(screen_x, screen_y)];
-                    let cell_style = Style::default().bg(self.style.floating_bg).fg(active_fg);
+                    let active_fg = constrain_rgb_to_color(
+                        floating.fg(cx, cy),
+                        self.style.color_mode,
+                        self.style.color_view_mode,
+                    );
+                    let mut cell_style = Style::default().bg(self.style.floating_bg);
+                    if let Some(active_fg) = active_fg {
+                        cell_style = cell_style.fg(active_fg);
+                    }
                     match floating.cell(cx, cy) {
-                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
+                        Some(CellValue::Narrow(ch) | CellValue::Wide(ch))
+                            if active_fg.is_some() =>
+                        {
                             buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
+                        }
+                        Some(CellValue::Narrow(_) | CellValue::Wide(_)) => {
+                            cell.set_char(' ').set_bg(self.style.floating_bg);
                         }
                         Some(CellValue::WideCont) => {
                             cell.set_bg(self.style.floating_bg);
@@ -291,8 +334,79 @@ impl<'a> Widget for CanvasWidget<'a> {
     }
 }
 
-fn rgb_to_color(c: RgbColor) -> Color {
-    Color::Rgb(c.r, c.g, c.b)
+pub fn constrain_color(
+    color: Color,
+    color_mode: ColorMode,
+    view_mode: ColorViewMode,
+) -> Option<Color> {
+    match color {
+        Color::Reset => Some(Color::Reset),
+        Color::Indexed(index) => {
+            constrain_rgb_to_color(counterparts_from_xterm256(index).rgb, color_mode, view_mode)
+        }
+        Color::Rgb(r, g, b) => {
+            constrain_rgb_to_color(RgbColor::new(r, g, b), color_mode, view_mode)
+        }
+        named => named_color_rgb(named)
+            .and_then(|rgb| constrain_rgb_to_color(rgb, color_mode, view_mode)),
+    }
+}
+
+fn constrain_rgb_to_color(
+    rgb: RgbColor,
+    color_mode: ColorMode,
+    view_mode: ColorViewMode,
+) -> Option<Color> {
+    let constrained = constrain_rgb(rgb, color_mode, view_mode)?;
+    Some(match color_mode {
+        ColorMode::Ansi16 => ansi16_to_color(counterparts_from_rgb(constrained).ansi16),
+        ColorMode::Xterm256 => Color::Indexed(counterparts_from_rgb(constrained).xterm256),
+        ColorMode::TrueColor => Color::Rgb(constrained.r, constrained.g, constrained.b),
+    })
+}
+
+fn ansi16_to_color(index: u8) -> Color {
+    match index & 0x0f {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::Gray,
+        8 => Color::DarkGray,
+        9 => Color::LightRed,
+        10 => Color::LightGreen,
+        11 => Color::LightYellow,
+        12 => Color::LightBlue,
+        13 => Color::LightMagenta,
+        14 => Color::LightCyan,
+        _ => Color::White,
+    }
+}
+
+fn named_color_rgb(color: Color) -> Option<RgbColor> {
+    let index = match color {
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        _ => return None,
+    };
+    Some(counterparts_from_ansi16(index).ansi16_rgb())
 }
 
 #[cfg(test)]
@@ -334,6 +448,50 @@ mod tests {
         let cell = &buf[(1, 0)];
         assert_eq!(cell.symbol(), "X");
         assert_eq!(cell.fg, Color::Rgb(200, 100, 50));
+    }
+
+    #[test]
+    fn nearest_mapped_color_mode_constrains_painted_cell_color() {
+        let mut canvas = blank_canvas(4, 2);
+        canvas.apply(&CanvasOp::PaintCell {
+            pos: Pos { x: 1, y: 0 },
+            ch: 'X',
+            fg: RgbColor::new(255, 110, 64),
+        });
+        let state = CanvasWidgetState::new(&canvas, Pos { x: 0, y: 0 });
+        let widget = CanvasWidget::new(&state).style(CanvasStyle {
+            color_mode: ColorMode::Xterm256,
+            color_view_mode: ColorViewMode::NearestMapped,
+            ..CanvasStyle::default()
+        });
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let cell = &buf[(1, 0)];
+        assert_eq!(cell.symbol(), "X");
+        assert_eq!(cell.fg, Color::Indexed(203));
+    }
+
+    #[test]
+    fn hide_unmapped_color_view_hides_inexact_painted_cell_color() {
+        let mut canvas = blank_canvas(4, 2);
+        canvas.apply(&CanvasOp::PaintCell {
+            pos: Pos { x: 1, y: 0 },
+            ch: 'X',
+            fg: RgbColor::new(255, 110, 64),
+        });
+        let state = CanvasWidgetState::new(&canvas, Pos { x: 0, y: 0 });
+        let widget = CanvasWidget::new(&state).style(CanvasStyle {
+            color_mode: ColorMode::Xterm256,
+            color_view_mode: ColorViewMode::HideUnmapped,
+            ..CanvasStyle::default()
+        });
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        assert_eq!(buf[(1, 0)].symbol(), " ");
     }
 
     #[test]
@@ -451,6 +609,7 @@ mod tests {
             width: 3,
             height: 1,
             cells: &cells,
+            colors: None,
             anchor: Pos { x: 1, y: 0 },
             transparent: true,
             active_color: RgbColor::new(255, 0, 0),

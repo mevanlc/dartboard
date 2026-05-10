@@ -9,7 +9,10 @@ use ratatui::layout::Rect;
 use dartboard_client_ws::WebsocketClient;
 #[cfg(test)]
 use dartboard_core::UserId;
-use dartboard_core::{Canvas, CanvasOp, Client, ClientOpId, Pos, RgbColor, ServerMsg};
+use dartboard_core::{
+    Canvas, CanvasOp, Client, ClientOpId, ColorMode, ColorViewMode, DartboardUser, Pos, RgbColor,
+    ServerMsg, UserMetadata,
+};
 #[cfg(test)]
 use dartboard_editor::{
     backspace as editor_backspace, copy_selection_or_cell as editor_copy_selection_or_cell,
@@ -145,14 +148,15 @@ struct UserSession {
 }
 
 #[derive(Debug, Clone)]
-pub struct LocalUser {
-    pub name: String,
-    pub color: RgbColor,
+pub struct LocalSession {
+    pub user: DartboardUser,
     session: UserSession,
 }
 
 pub struct App {
     pub canvas: Canvas,
+    pub color_mode: ColorMode,
+    pub color_view_mode: ColorViewMode,
     pub cursor: Pos,
     pub mode: Mode,
     pub should_quit: bool,
@@ -178,7 +182,7 @@ pub struct App {
     paint_stroke_last: Option<Pos>,
     undo_stack: Vec<Canvas>,
     redo_stack: Vec<Canvas>,
-    users: Vec<LocalUser>,
+    users: Vec<LocalSession>,
     active_user_idx: usize,
     transport: Transport,
 }
@@ -273,27 +277,41 @@ impl App {
     }
 
     pub fn new() -> Self {
+        Self::new_with_color_modes(ColorMode::default(), ColorViewMode::default())
+    }
+
+    pub fn new_with_color_modes(color_mode: ColorMode, color_view_mode: ColorViewMode) -> Self {
         let default_session = UserSession::default();
-        let users: Vec<LocalUser> = theme::PLAYER_PALETTE
+        let mut users: Vec<LocalSession> = theme::PLAYER_PALETTE
             .iter()
             .zip(theme::PLAYER_COLOR_NAMES.iter())
-            .map(|(color, name)| LocalUser {
-                name: (*name).to_string(),
-                color: *color,
+            .map(|(color, name)| LocalSession {
+                user: DartboardUser {
+                    user_id: 0,
+                    name: (*name).to_string(),
+                    color: *color,
+                    metadata: UserMetadata::new(),
+                },
                 session: default_session.clone(),
             })
             .collect();
 
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut clients: Vec<ClientBox> = users
-            .iter()
-            .map(|u| {
-                ClientBox::Local(server.connect_local(Hello {
-                    name: u.name.clone(),
-                    color: u.color,
-                }))
-            })
-            .collect();
+        let mut clients: Vec<ClientBox> = Vec::with_capacity(users.len());
+        for local in &mut users {
+            let mut client = server.connect_local(Hello {
+                name: local.user.name.clone(),
+                color: local.user.color,
+                metadata: local.user.metadata.clone(),
+            });
+            local.user.user_id = client.user_id();
+            while let Some(msg) = client.try_recv() {
+                if let ServerMsg::Welcome { your_color, .. } = msg {
+                    local.user.color = your_color;
+                }
+            }
+            clients.push(ClientBox::Local(client));
+        }
         for client in &mut clients {
             while client.try_recv().is_some() {}
         }
@@ -301,6 +319,8 @@ impl App {
         let current_session = default_session;
         Self {
             canvas: Canvas::new(),
+            color_mode,
+            color_view_mode,
             cursor: current_session.editor.cursor,
             mode: current_session.editor.mode,
             should_quit: false,
@@ -341,15 +361,37 @@ impl App {
     /// Welcome snapshot is applied — otherwise Welcome's pre-join empty
     /// snapshot would stomp the user's first paint.
     pub fn new_remote(client: WebsocketClient, name: String, color: RgbColor) -> Self {
-        let default_session = UserSession::default();
-        let users = vec![LocalUser {
+        Self::new_remote_with_color_modes(
+            client,
             name,
             color,
+            ColorMode::default(),
+            ColorViewMode::default(),
+        )
+    }
+
+    pub fn new_remote_with_color_modes(
+        client: WebsocketClient,
+        name: String,
+        color: RgbColor,
+        color_mode: ColorMode,
+        color_view_mode: ColorViewMode,
+    ) -> Self {
+        let default_session = UserSession::default();
+        let users = vec![LocalSession {
+            user: DartboardUser {
+                user_id: 0,
+                name,
+                color,
+                metadata: UserMetadata::new(),
+            },
             session: default_session.clone(),
         }];
         let current_session = default_session;
         let mut app = Self {
             canvas: Canvas::new(),
+            color_mode,
+            color_view_mode,
             cursor: current_session.editor.cursor,
             mode: current_session.editor.mode,
             should_quit: false,
@@ -446,7 +488,7 @@ impl App {
         self.clamp_cursor();
     }
 
-    pub fn users(&self) -> &[LocalUser] {
+    pub fn users(&self) -> &[LocalSession] {
         &self.users
     }
 
@@ -455,7 +497,15 @@ impl App {
     }
 
     pub fn active_user_color(&self) -> RgbColor {
-        self.users[self.active_user_idx].color
+        self.users[self.active_user_idx].user.color
+    }
+
+    pub fn cycle_color_mode(&mut self) {
+        self.color_mode = self.color_mode.next();
+    }
+
+    pub fn cycle_color_view_mode(&mut self) {
+        self.color_view_mode = self.color_view_mode.next();
     }
 
     pub fn is_embedded(&self) -> bool {
@@ -557,6 +607,7 @@ impl App {
                     };
                     match event {
                         MirrorEvent::Welcomed {
+                            my_user_id,
                             my_color,
                             peers,
                             snapshot,
@@ -564,11 +615,11 @@ impl App {
                         } => {
                             self.canvas = snapshot;
                             self.users.truncate(1);
-                            self.users[0].color = my_color;
+                            self.users[0].user.user_id = my_user_id;
+                            self.users[0].user.color = my_color;
                             for p in peers {
-                                self.users.push(LocalUser {
-                                    name: p.name,
-                                    color: p.color,
+                                self.users.push(LocalSession {
+                                    user: p,
                                     session: UserSession::default(),
                                 });
                             }
@@ -577,9 +628,8 @@ impl App {
                             self.canvas.apply(&op);
                         }
                         MirrorEvent::PeerJoined(peer) => {
-                            self.users.push(LocalUser {
-                                name: peer.name,
-                                color: peer.color,
+                            self.users.push(LocalSession {
+                                user: peer,
                                 session: UserSession::default(),
                             });
                         }
@@ -1117,6 +1167,16 @@ impl App {
             return vec![HostEffect::RequestQuit];
         }
 
+        if key.code == AppKeyCode::F(2) {
+            self.cycle_color_mode();
+            return Vec::new();
+        }
+
+        if key.code == AppKeyCode::F(3) {
+            self.cycle_color_view_mode();
+            return Vec::new();
+        }
+
         if self.show_help {
             match key.code {
                 AppKeyCode::Esc | AppKeyCode::F(1) => self.show_help = false,
@@ -1265,9 +1325,12 @@ impl App {
                 self.stamp_floating();
                 FloatingOutcome::Consumed
             }
-            Some(EditorAction::CopySelection) | Some(EditorAction::CutSelection) => {
-                FloatingOutcome::Consumed
-            }
+            Some(
+                EditorAction::CopySelection
+                | EditorAction::CopySelectionWithoutColor
+                | EditorAction::CutSelection
+                | EditorAction::CutSelectionWithoutColor,
+            ) => FloatingOutcome::Consumed,
             Some(EditorAction::ClearSelection) => {
                 self.dismiss_floating();
                 FloatingOutcome::Consumed
@@ -1809,7 +1872,11 @@ mod tests {
     #[test]
     fn local_users_start_with_distinct_colors() {
         let app = App::new();
-        let colors: Vec<_> = app.users().iter().map(|user| user.color).collect();
+        let colors: Vec<_> = app
+            .users()
+            .iter()
+            .map(|session| session.user.color)
+            .collect();
         for (idx, color) in colors.iter().enumerate() {
             assert!(
                 colors[(idx + 1)..].iter().all(|other| other != color),
@@ -1893,14 +1960,8 @@ mod tests {
         use dartboard_server::{Hello, InMemStore, ServerHandle};
 
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut alice = server.connect_local(Hello {
-            name: "alice".into(),
-            color: RgbColor::new(255, 0, 0),
-        });
-        let mut bob = server.connect_local(Hello {
-            name: "bob".into(),
-            color: RgbColor::new(0, 0, 255),
-        });
+        let mut alice = server.connect_local(Hello::new("alice", RgbColor::new(255, 0, 0)));
+        let mut bob = server.connect_local(Hello::new("bob", RgbColor::new(0, 0, 255)));
         while alice.try_recv().is_some() {}
         while bob.try_recv().is_some() {}
 
@@ -1945,10 +2006,10 @@ mod tests {
 
         // Pre-seed the server with one cell to prove the snapshot actually
         // arrives — we expect our mirror to reflect it immediately.
-        let mut seeder = server.connect_local(dartboard_server::Hello {
-            name: "seeder".into(),
-            color: RgbColor::new(1, 1, 1),
-        });
+        let mut seeder = server.connect_local(dartboard_server::Hello::new(
+            "seeder",
+            RgbColor::new(1, 1, 1),
+        ));
         seeder.submit_op(CanvasOp::PaintCell {
             pos: Pos { x: 5, y: 5 },
             ch: 'Z',
@@ -1957,14 +2018,8 @@ mod tests {
         drop(seeder);
 
         let url = format!("ws://{}", addr);
-        let client = WebsocketClient::connect(
-            &url,
-            WsHello {
-                name: "me".into(),
-                color: RgbColor::new(255, 0, 0),
-            },
-        )
-        .unwrap();
+        let client =
+            WebsocketClient::connect(&url, WsHello::new("me", RgbColor::new(255, 0, 0))).unwrap();
 
         let app = App::new_remote(client, "me".into(), RgbColor::new(255, 0, 0));
         // After new_remote returns, Welcome must have been applied.
@@ -2001,20 +2056,11 @@ mod tests {
             .unwrap();
         server.bind_ws(addr).unwrap();
         // Pre-existing peer (simulates another dartboard --connect having joined first)
-        let _other = server.connect_local(Hello {
-            name: "other".into(),
-            color: RgbColor::new(10, 10, 10),
-        });
+        let _other = server.connect_local(Hello::new("other", RgbColor::new(10, 10, 10)));
 
         let url = format!("ws://{}", addr);
-        let client = WebsocketClient::connect(
-            &url,
-            WsHello {
-                name: "me".into(),
-                color: RgbColor::new(255, 0, 0),
-            },
-        )
-        .unwrap();
+        let client =
+            WebsocketClient::connect(&url, WsHello::new("me", RgbColor::new(255, 0, 0))).unwrap();
 
         let mut app = App::new_remote(client, "me".into(), RgbColor::new(255, 0, 0));
 
@@ -2047,20 +2093,13 @@ mod tests {
 
         let mut _peers = Vec::new();
         for i in 0..MAX_PLAYERS {
-            _peers.push(server.connect_local(Hello {
-                name: format!("peer{i}"),
-                color: theme::PLAYER_PALETTE[i],
-            }));
+            _peers.push(
+                server.connect_local(Hello::new(format!("peer{i}"), theme::PLAYER_PALETTE[i])),
+            );
         }
 
         let url = format!("ws://{}", addr);
-        match WebsocketClient::connect(
-            &url,
-            WsHello {
-                name: "overflow".into(),
-                color: RgbColor::new(255, 0, 0),
-            },
-        ) {
+        match WebsocketClient::connect(&url, WsHello::new("overflow", RgbColor::new(255, 0, 0))) {
             Err(ConnectError::Rejected(reason)) => {
                 assert!(reason.to_lowercase().contains("full"), "reason: {reason}");
             }
@@ -2306,6 +2345,27 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_alt_copy_pastes_with_active_color() {
+        let mut app = App::new();
+        let active_color = app.active_user_color();
+        let source_color = RgbColor::new(1, 2, 3);
+        app.canvas
+            .set_colored(Pos { x: 1, y: 1 }, 'X', source_color);
+        app.cursor = Pos { x: 1, y: 1 };
+
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        app.cursor = Pos { x: 5, y: 1 };
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.canvas.get(Pos { x: 5, y: 1 }), 'X');
+        assert_eq!(app.canvas.fg(Pos { x: 5, y: 1 }), Some(active_color));
+        assert_ne!(app.canvas.fg(Pos { x: 5, y: 1 }), Some(source_color));
+    }
+
+    #[test]
     fn swatch_history_newest_first_and_capped() {
         let mut app = App::new();
         for (i, ch) in ['A', 'B', 'C', 'D', 'E', 'F'].iter().enumerate() {
@@ -2518,8 +2578,10 @@ mod tests {
     #[test]
     fn stamp_floating_writes_to_canvas() {
         let mut app = App::new();
-        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
-        app.canvas.set(Pos { x: 1, y: 0 }, 'B');
+        let red = RgbColor::new(210, 30, 40);
+        let blue = RgbColor::new(40, 70, 220);
+        app.canvas.set_colored(Pos { x: 0, y: 0 }, 'A', red);
+        app.canvas.set_colored(Pos { x: 1, y: 0 }, 'B', blue);
         app.selection_anchor = Some(Pos { x: 0, y: 0 });
         app.cursor = Pos { x: 1, y: 0 };
         app.mode = Mode::Select;
@@ -2533,6 +2595,8 @@ mod tests {
         assert!(app.floating.is_some());
         assert_eq!(app.canvas.get(Pos { x: 5, y: 3 }), 'A');
         assert_eq!(app.canvas.get(Pos { x: 6, y: 3 }), 'B');
+        assert_eq!(app.canvas.fg(Pos { x: 5, y: 3 }), Some(red));
+        assert_eq!(app.canvas.fg(Pos { x: 6, y: 3 }), Some(blue));
     }
 
     #[test]
@@ -2634,7 +2698,8 @@ mod tests {
     fn drag_paints_like_brush_with_single_undo() {
         let mut app = App::new();
         app.set_viewport(Rect::new(0, 0, 20, 10));
-        app.canvas.set(Pos { x: 0, y: 0 }, 'X');
+        let brush_color = RgbColor::new(20, 180, 90);
+        app.canvas.set_colored(Pos { x: 0, y: 0 }, 'X', brush_color);
         app.selection_anchor = Some(Pos { x: 0, y: 0 });
         app.cursor = Pos { x: 0, y: 0 };
         app.mode = Mode::Select;
@@ -2672,6 +2737,9 @@ mod tests {
         assert_eq!(app.canvas.get(Pos { x: 3, y: 2 }), 'X');
         assert_eq!(app.canvas.get(Pos { x: 5, y: 2 }), 'X');
         assert_eq!(app.canvas.get(Pos { x: 7, y: 2 }), 'X');
+        assert_eq!(app.canvas.fg(Pos { x: 3, y: 2 }), Some(brush_color));
+        assert_eq!(app.canvas.fg(Pos { x: 5, y: 2 }), Some(brush_color));
+        assert_eq!(app.canvas.fg(Pos { x: 7, y: 2 }), Some(brush_color));
 
         // Float still active
         assert!(app.floating.is_some());

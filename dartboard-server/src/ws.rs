@@ -30,7 +30,15 @@ pub(crate) async fn accept_and_run(
 
     let hello = match read.next().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text)? {
-            ClientMsg::Hello { name, color } => Hello { name, color },
+            ClientMsg::Hello {
+                name,
+                color,
+                metadata,
+            } => Hello {
+                name,
+                color,
+                metadata,
+            },
             other => return Err(format!("expected Hello, got {:?}", other).into()),
         },
         other => return Err(format!("expected Hello frame, got {:?}", other).into()),

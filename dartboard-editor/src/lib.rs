@@ -190,7 +190,9 @@ pub enum EditorAction {
     PullFromDown,
 
     CopySelection,
+    CopySelectionWithoutColor,
     CutSelection,
+    CutSelectionWithoutColor,
     PastePrimarySwatch,
     ExportSystemClipboard,
     ActivateSwatch(usize),
@@ -322,14 +324,34 @@ pub struct Clipboard {
     pub width: usize,
     pub height: usize,
     cells: Vec<Option<CellValue>>,
+    colors: Vec<Option<RgbColor>>,
 }
 
 impl Clipboard {
     pub fn new(width: usize, height: usize, cells: Vec<Option<CellValue>>) -> Self {
+        let colors = vec![None; cells.len()];
+        Self::new_with_colors(width, height, cells, colors)
+    }
+
+    pub fn new_with_colors(
+        width: usize,
+        height: usize,
+        cells: Vec<Option<CellValue>>,
+        colors: Vec<Option<RgbColor>>,
+    ) -> Self {
+        debug_assert_eq!(cells.len(), width * height);
+        debug_assert_eq!(colors.len(), width * height);
+        let mut colors = colors;
+        for (cell, color) in cells.iter().zip(colors.iter_mut()) {
+            if cell.is_none() {
+                *color = None;
+            }
+        }
         Self {
             width,
             height,
             cells,
+            colors,
         }
     }
 
@@ -337,8 +359,16 @@ impl Clipboard {
         self.cells[y * self.width + x]
     }
 
+    pub fn fg(&self, x: usize, y: usize) -> Option<RgbColor> {
+        self.colors[y * self.width + x]
+    }
+
     pub fn cells(&self) -> &[Option<CellValue>] {
         &self.cells
+    }
+
+    pub fn colors(&self) -> &[Option<RgbColor>] {
+        &self.colors
     }
 }
 
@@ -968,14 +998,34 @@ pub fn draw_border(canvas: &mut Canvas, selection: Selection, color: RgbColor) {
     }
 }
 
-pub fn capture_bounds(canvas: &Canvas, bounds: Bounds) -> Clipboard {
+fn capture_bounds_with_color_mode(
+    canvas: &Canvas,
+    bounds: Bounds,
+    preserve_colors: bool,
+) -> Clipboard {
     let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
+    let mut colors = Vec::with_capacity(bounds.width() * bounds.height());
     for y in bounds.min_y..=bounds.max_y {
         for x in bounds.min_x..=bounds.max_x {
-            cells.push(canvas.cell(Pos { x, y }));
+            let pos = Pos { x, y };
+            let cell = canvas.cell(pos);
+            cells.push(cell);
+            colors.push(
+                (preserve_colors)
+                    .then(|| cell.and_then(|_| canvas.fg(pos)))
+                    .flatten(),
+            );
         }
     }
-    Clipboard::new(bounds.width(), bounds.height(), cells)
+    Clipboard::new_with_colors(bounds.width(), bounds.height(), cells, colors)
+}
+
+pub fn capture_bounds(canvas: &Canvas, bounds: Bounds) -> Clipboard {
+    capture_bounds_with_color_mode(canvas, bounds, true)
+}
+
+pub fn capture_bounds_without_color(canvas: &Canvas, bounds: Bounds) -> Clipboard {
+    capture_bounds_with_color_mode(canvas, bounds, false)
 }
 
 fn selection_covers_cell(canvas: &Canvas, selection: Selection, pos: Pos) -> bool {
@@ -996,17 +1046,36 @@ fn selection_covers_cell(canvas: &Canvas, selection: Selection, pos: Pos) -> boo
     })
 }
 
-pub fn capture_selection(canvas: &Canvas, selection: Selection) -> Clipboard {
+fn capture_selection_with_color_mode(
+    canvas: &Canvas,
+    selection: Selection,
+    preserve_colors: bool,
+) -> Clipboard {
     let bounds = selection.bounds().normalized_for_canvas(canvas);
     let mut cells = Vec::with_capacity(bounds.width() * bounds.height());
+    let mut colors = Vec::with_capacity(bounds.width() * bounds.height());
     for y in bounds.min_y..=bounds.max_y {
         for x in bounds.min_x..=bounds.max_x {
             let pos = Pos { x, y };
             let include = selection_covers_cell(canvas, selection, pos);
-            cells.push(include.then(|| canvas.cell(pos)).flatten());
+            let cell = include.then(|| canvas.cell(pos)).flatten();
+            cells.push(cell);
+            colors.push(
+                (preserve_colors)
+                    .then(|| cell.and_then(|_| canvas.fg(pos)))
+                    .flatten(),
+            );
         }
     }
-    Clipboard::new(bounds.width(), bounds.height(), cells)
+    Clipboard::new_with_colors(bounds.width(), bounds.height(), cells, colors)
+}
+
+pub fn capture_selection(canvas: &Canvas, selection: Selection) -> Clipboard {
+    capture_selection_with_color_mode(canvas, selection, true)
+}
+
+pub fn capture_selection_without_color(canvas: &Canvas, selection: Selection) -> Clipboard {
+    capture_selection_with_color_mode(canvas, selection, false)
 }
 
 pub fn export_bounds_as_text(canvas: &Canvas, bounds: Bounds) -> String {
@@ -1069,7 +1138,8 @@ pub fn stamp_clipboard(
             };
             match clipboard.get(x, y) {
                 Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
-                    let _ = canvas.put_glyph_colored(target, ch, color);
+                    let fg = clipboard.fg(x, y).unwrap_or(color);
+                    let _ = canvas.put_glyph_colored(target, ch, fg);
                 }
                 Some(CellValue::WideCont) => {}
                 None if !transparent => canvas.clear(target),
@@ -1097,17 +1167,30 @@ pub fn export_system_clipboard_text(editor: &EditorSession, canvas: &Canvas) -> 
 }
 
 pub fn copy_selection_or_cell(editor: &mut EditorSession, canvas: &Canvas) -> bool {
+    copy_selection_or_cell_with_color_mode(editor, canvas, true)
+}
+
+pub fn copy_selection_or_cell_without_color(editor: &mut EditorSession, canvas: &Canvas) -> bool {
+    copy_selection_or_cell_with_color_mode(editor, canvas, false)
+}
+
+fn copy_selection_or_cell_with_color_mode(
+    editor: &mut EditorSession,
+    canvas: &Canvas,
+    preserve_colors: bool,
+) -> bool {
     if editor.floating.is_some() {
         return false;
     }
 
     let clipboard = match editor.selection() {
-        Some(selection) => capture_selection(canvas, selection),
-        None => capture_bounds(
+        Some(selection) => capture_selection_with_color_mode(canvas, selection, preserve_colors),
+        None => capture_bounds_with_color_mode(
             canvas,
             editor
                 .selection_or_cursor_bounds()
                 .normalized_for_canvas(canvas),
+            preserve_colors,
         ),
     };
     editor.push_swatch(clipboard);
@@ -1119,6 +1202,23 @@ pub fn cut_selection_or_cell(
     canvas: &mut Canvas,
     color: RgbColor,
 ) -> bool {
+    cut_selection_or_cell_with_color_mode(editor, canvas, color, true)
+}
+
+pub fn cut_selection_or_cell_without_color(
+    editor: &mut EditorSession,
+    canvas: &mut Canvas,
+    color: RgbColor,
+) -> bool {
+    cut_selection_or_cell_with_color_mode(editor, canvas, color, false)
+}
+
+fn cut_selection_or_cell_with_color_mode(
+    editor: &mut EditorSession,
+    canvas: &mut Canvas,
+    color: RgbColor,
+    preserve_colors: bool,
+) -> bool {
     if editor.floating.is_some() {
         return false;
     }
@@ -1128,8 +1228,8 @@ pub fn cut_selection_or_cell(
         .selection_or_cursor_bounds()
         .normalized_for_canvas(canvas);
     let clipboard = selection
-        .map(|selection| capture_selection(canvas, selection))
-        .unwrap_or_else(|| capture_bounds(canvas, bounds));
+        .map(|selection| capture_selection_with_color_mode(canvas, selection, preserve_colors))
+        .unwrap_or_else(|| capture_bounds_with_color_mode(canvas, bounds, preserve_colors));
     editor.push_swatch(clipboard);
     match selection {
         Some(selection) => fill_selection(canvas, selection, bounds, ' ', color),
@@ -1483,8 +1583,14 @@ pub fn handle_editor_action(
         EditorAction::CopySelection => {
             let _ = copy_selection_or_cell(editor, canvas);
         }
+        EditorAction::CopySelectionWithoutColor => {
+            let _ = copy_selection_or_cell_without_color(editor, canvas);
+        }
         EditorAction::CutSelection => {
             let _ = cut_selection_or_cell(editor, canvas, color);
+        }
+        EditorAction::CutSelectionWithoutColor => {
+            let _ = cut_selection_or_cell_without_color(editor, canvas, color);
         }
         EditorAction::PastePrimarySwatch => {
             let _ = paste_primary_swatch(editor, canvas, color);
@@ -1910,10 +2016,11 @@ pub fn paint_floating_drag(
 #[cfg(test)]
 mod tests {
     use super::{
-        backspace, begin_paint_stroke, capture_bounds, capture_selection, copy_selection_or_cell,
-        cut_selection_or_cell, delete_at_cursor, diff_canvas_op, dismiss_floating, draw_border,
-        draw_selection_border, export_selection_as_text, export_system_clipboard_text,
-        fill_selection, fill_selection_or_cell, handle_editor_action, handle_editor_key_press,
+        backspace, begin_paint_stroke, capture_bounds, capture_selection,
+        capture_selection_without_color, copy_selection_or_cell, cut_selection_or_cell,
+        delete_at_cursor, diff_canvas_op, dismiss_floating, draw_border, draw_selection_border,
+        export_selection_as_text, export_system_clipboard_text, fill_selection,
+        fill_selection_or_cell, handle_editor_action, handle_editor_key_press,
         handle_editor_pointer, insert_char, paint_floating_drag, paste_primary_swatch,
         paste_text_block, smart_fill, smart_fill_glyph, stamp_clipboard,
         transpose_selection_corner, AppKey, AppKeyCode, AppModifiers, AppPointerButton,
@@ -2238,6 +2345,43 @@ mod tests {
     }
 
     #[test]
+    fn capture_selection_preserves_cell_colors() {
+        let red = RgbColor::new(200, 10, 20);
+        let blue = RgbColor::new(20, 30, 220);
+        let mut canvas = Canvas::with_size(3, 1);
+        canvas.set_colored(Pos { x: 0, y: 0 }, 'A', red);
+        canvas.set_colored(Pos { x: 1, y: 0 }, 'B', blue);
+        let selection = Selection {
+            anchor: Pos { x: 0, y: 0 },
+            cursor: Pos { x: 1, y: 0 },
+            shape: SelectionShape::Rect,
+        };
+
+        let clipboard = capture_selection(&canvas, selection);
+
+        assert_eq!(clipboard.get(0, 0), Some(CellValue::Narrow('A')));
+        assert_eq!(clipboard.fg(0, 0), Some(red));
+        assert_eq!(clipboard.get(1, 0), Some(CellValue::Narrow('B')));
+        assert_eq!(clipboard.fg(1, 0), Some(blue));
+    }
+
+    #[test]
+    fn capture_selection_without_color_omits_cell_colors() {
+        let mut canvas = Canvas::with_size(2, 1);
+        canvas.set_colored(Pos { x: 0, y: 0 }, 'A', RgbColor::new(200, 10, 20));
+        let selection = Selection {
+            anchor: Pos { x: 0, y: 0 },
+            cursor: Pos { x: 0, y: 0 },
+            shape: SelectionShape::Rect,
+        };
+
+        let clipboard = capture_selection_without_color(&canvas, selection);
+
+        assert_eq!(clipboard.get(0, 0), Some(CellValue::Narrow('A')));
+        assert_eq!(clipboard.fg(0, 0), None);
+    }
+
+    #[test]
     fn capture_selection_on_wide_glyph_origin_includes_both_cells() {
         let mut canvas = Canvas::with_size(6, 1);
         canvas.set(Pos { x: 2, y: 0 }, '🌱');
@@ -2466,6 +2610,25 @@ mod tests {
             canvas.cell(Pos { x: 2, y: 1 }),
             Some(CellValue::Narrow('P'))
         );
+        assert_eq!(canvas.fg(Pos { x: 2, y: 1 }), Some(RgbColor::new(4, 5, 6)));
+
+        let copied = Clipboard::new_with_colors(
+            1,
+            1,
+            vec![Some(CellValue::Narrow('C'))],
+            vec![Some(RgbColor::new(9, 8, 7))],
+        );
+        editor.push_swatch(copied);
+        assert!(paste_primary_swatch(
+            &editor,
+            &mut canvas,
+            RgbColor::new(1, 1, 1)
+        ));
+        assert_eq!(
+            canvas.cell(Pos { x: 2, y: 1 }),
+            Some(CellValue::Narrow('C'))
+        );
+        assert_eq!(canvas.fg(Pos { x: 2, y: 1 }), Some(RgbColor::new(9, 8, 7)));
 
         fill_selection_or_cell(&editor, &mut canvas, 'x', RgbColor::new(7, 8, 9));
         assert_eq!(

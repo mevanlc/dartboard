@@ -12,7 +12,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc as tkmpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use dartboard_core::{CanvasOp, Client, ClientMsg, ClientOpId, RgbColor, ServerMsg};
+use dartboard_core::{CanvasOp, Client, ClientMsg, ClientOpId, RgbColor, ServerMsg, UserMetadata};
 
 /// The same Hello shape [`dartboard_local::Hello`] uses; defined here to
 /// avoid a server dep from the client-ws crate.
@@ -20,6 +20,17 @@ use dartboard_core::{CanvasOp, Client, ClientMsg, ClientOpId, RgbColor, ServerMs
 pub struct Hello {
     pub name: String,
     pub color: RgbColor,
+    pub metadata: UserMetadata,
+}
+
+impl Hello {
+    pub fn new(name: impl Into<String>, color: RgbColor) -> Self {
+        Self {
+            name: name.into(),
+            color,
+            metadata: UserMetadata::new(),
+        }
+    }
 }
 
 pub struct WebsocketClient {
@@ -121,6 +132,7 @@ async fn run_connection(
     let hello_text = serde_json::to_string(&ClientMsg::Hello {
         name: hello.name,
         color: hello.color,
+        metadata: hello.metadata,
     })?;
     write.send(Message::Text(hello_text)).await?;
 

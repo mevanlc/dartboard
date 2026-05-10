@@ -191,6 +191,11 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         ctrl: true,
         ..Default::default()
     };
+    let ctrl_alt = AppModifiers {
+        ctrl: true,
+        alt: true,
+        ..Default::default()
+    };
     let ctrl_shift = AppModifiers {
         ctrl: true,
         shift: true,
@@ -365,6 +370,42 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
             trigger: KeyTrigger::Key(AppKey {
                 code,
                 modifiers: ctrl,
+            }),
+            action: ActionSpec::Fixed(action),
+            context: BindingContext::Always,
+            description: desc,
+            help: binding_help,
+        });
+    }
+
+    for (code, action, desc, binding_help) in [
+        (
+            AppKeyCode::Char('c'),
+            EditorAction::CopySelectionWithoutColor,
+            "copy selection without colors",
+            help(
+                HelpSection::Clipboard,
+                "^alt+C",
+                "copy active-color swatch",
+                15,
+            ),
+        ),
+        (
+            AppKeyCode::Char('x'),
+            EditorAction::CutSelectionWithoutColor,
+            "cut selection without colors",
+            help(
+                HelpSection::Clipboard,
+                "^alt+X",
+                "cut active-color swatch",
+                25,
+            ),
+        ),
+    ] {
+        out.push(KeyBinding {
+            trigger: KeyTrigger::Key(AppKey {
+                code,
+                modifiers: ctrl_alt,
             }),
             action: ActionSpec::Fixed(action),
             context: BindingContext::Always,
@@ -802,6 +843,23 @@ mod tests {
         assert_eq!(
             resolve(key(AppKeyCode::Char('c'), mods)),
             Some(EditorAction::ExportSystemClipboard)
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_copy_and_cut_omit_colors() {
+        let mods = AppModifiers {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve(key(AppKeyCode::Char('c'), mods)),
+            Some(EditorAction::CopySelectionWithoutColor)
+        );
+        assert_eq!(
+            resolve(key(AppKeyCode::Char('x'), mods)),
+            Some(EditorAction::CutSelectionWithoutColor)
         );
     }
 

@@ -11,7 +11,7 @@ use crossterm::terminal::{
 };
 use dartboard_cli::{app::App, theme, ui};
 use dartboard_client_ws::{Hello, WebsocketClient};
-use dartboard_core::RgbColor;
+use dartboard_core::{ColorMode, ColorViewMode, RgbColor};
 use dartboard_server::{InMemStore, ServerHandle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -26,12 +26,16 @@ struct Args {
     mode: Mode,
     user_name: Option<String>,
     user_color: Option<RgbColor>,
+    color_mode: ColorMode,
+    color_view_mode: ColorViewMode,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut mode: Option<Mode> = None;
     let mut user_name: Option<String> = None;
     let mut user_color: Option<RgbColor> = None;
+    let mut color_mode: Option<ColorMode> = None;
+    let mut color_view_mode: Option<ColorViewMode> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -53,6 +57,16 @@ fn parse_args() -> Result<Args, String> {
                 let hex = args.next().ok_or("--user-color needs <rrggbb>")?;
                 user_color = Some(parse_hex_color(&hex)?);
             }
+            "--color-mode" => {
+                let value = args.next().ok_or("--color-mode needs <16|256|truecolor>")?;
+                color_mode = Some(value.parse()?);
+            }
+            "--color-view-mode" => {
+                let value = args
+                    .next()
+                    .ok_or("--color-view-mode needs <hide-unmapped|nearest-mapped>")?;
+                color_view_mode = Some(value.parse()?);
+            }
             other => return Err(format!("unknown flag: {}", other)),
         }
     }
@@ -66,6 +80,8 @@ fn parse_args() -> Result<Args, String> {
         mode,
         user_name,
         user_color,
+        color_mode: color_mode.unwrap_or_else(detect_color_mode),
+        color_view_mode: color_view_mode.unwrap_or_default(),
     })
 }
 
@@ -100,6 +116,10 @@ OPTIONS (--connect only):
   --user <name>                   identify as <name> (default: $USER)
   --user-color <rrggbb>           override auto-picked palette color
 
+OPTIONS:
+  --color-mode <mode>             16, 256, or truecolor (default: env-detected)
+  --color-view-mode <mode>        hide-unmapped or nearest-mapped
+
 FLAGS:
   -h, --help                      show this message
 ";
@@ -114,14 +134,16 @@ fn main() -> io::Result<()> {
     };
 
     match args.mode {
-        Mode::Embedded => run_tui(App::new()),
+        Mode::Embedded => run_tui(App::new_with_color_modes(
+            args.color_mode,
+            args.color_view_mode,
+        )),
         Mode::Connect(url) => {
-            let hello = Hello {
-                name: args
-                    .user_name
+            let hello = Hello::new(
+                args.user_name
                     .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "player".into())),
-                color: args.user_color.unwrap_or_else(pick_user_color),
-            };
+                args.user_color.unwrap_or_else(pick_user_color),
+            );
             let client = match WebsocketClient::connect(&url, hello.clone()) {
                 Ok(c) => c,
                 Err(e) => {
@@ -129,7 +151,13 @@ fn main() -> io::Result<()> {
                     std::process::exit(1);
                 }
             };
-            run_tui(App::new_remote(client, hello.name, hello.color))
+            run_tui(App::new_remote_with_color_modes(
+                client,
+                hello.name,
+                hello.color,
+                args.color_mode,
+                args.color_view_mode,
+            ))
         }
         Mode::Listen(addr) => run_listen(addr),
     }
@@ -160,6 +188,27 @@ fn pick_user_color() -> RgbColor {
     *theme::PLAYER_PALETTE
         .choose(&mut rand::thread_rng())
         .unwrap_or(&theme::DEFAULT_GLYPH_FG)
+}
+
+fn detect_color_mode() -> ColorMode {
+    if std::env::var("COLORTERM")
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("truecolor") || value.contains("24bit")
+        })
+        .unwrap_or(false)
+    {
+        return ColorMode::TrueColor;
+    }
+
+    if std::env::var("TERM")
+        .map(|value| value.to_ascii_lowercase().contains("256color"))
+        .unwrap_or(false)
+    {
+        ColorMode::Xterm256
+    } else {
+        ColorMode::Ansi16
+    }
 }
 
 fn run_tui(mut app: App) -> io::Result<()> {

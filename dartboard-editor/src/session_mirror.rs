@@ -1,4 +1,4 @@
-use dartboard_core::{Canvas, CanvasOp, Peer, RgbColor, ServerMsg, UserId};
+use dartboard_core::{Canvas, CanvasOp, DartboardUser, RgbColor, ServerMsg, UserId};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectState {
@@ -13,7 +13,7 @@ pub enum ConnectState {
 /// without re-matching the raw wire enum.
 #[derive(Debug, Default, Clone)]
 pub struct SessionMirror {
-    pub peers: Vec<Peer>,
+    pub peers: Vec<DartboardUser>,
     pub my_user_id: Option<UserId>,
     pub my_color: Option<RgbColor>,
     pub connect_state: ConnectState,
@@ -24,14 +24,14 @@ pub enum MirrorEvent {
     Welcomed {
         my_user_id: UserId,
         my_color: RgbColor,
-        peers: Vec<Peer>,
+        peers: Vec<DartboardUser>,
         snapshot: Canvas,
     },
     RemoteOp {
         op: CanvasOp,
         from: UserId,
     },
-    PeerJoined(Peer),
+    PeerJoined(DartboardUser),
     PeerLeft {
         user_id: UserId,
         index: usize,
@@ -101,11 +101,12 @@ mod tests {
     use super::*;
     use dartboard_core::{CanvasOp, Pos};
 
-    fn make_peer(user_id: UserId, name: &str) -> Peer {
-        Peer {
+    fn make_peer(user_id: UserId, name: &str) -> DartboardUser {
+        DartboardUser {
             user_id,
             name: name.to_string(),
             color: RgbColor::new(1, 2, 3),
+            metadata: Default::default(),
         }
     }
 

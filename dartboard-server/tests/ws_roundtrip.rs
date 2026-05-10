@@ -57,23 +57,11 @@ fn ws_two_clients_see_each_others_paints() {
     server.bind_ws(addr).expect("bind_ws should succeed");
     let url = format!("ws://{}", addr);
 
-    let mut alice = WebsocketClient::connect(
-        &url,
-        Hello {
-            name: "alice".into(),
-            color: RgbColor::new(255, 0, 0),
-        },
-    )
-    .expect("alice connect");
+    let mut alice = WebsocketClient::connect(&url, Hello::new("alice", RgbColor::new(255, 0, 0)))
+        .expect("alice connect");
 
-    let mut bob = WebsocketClient::connect(
-        &url,
-        Hello {
-            name: "bob".into(),
-            color: RgbColor::new(0, 0, 255),
-        },
-    )
-    .expect("bob connect");
+    let mut bob = WebsocketClient::connect(&url, Hello::new("bob", RgbColor::new(0, 0, 255)))
+        .expect("bob connect");
 
     // Consume welcomes and peer-join events
     let _ = drain(&mut alice);
@@ -111,22 +99,10 @@ fn ws_concurrent_disjoint_paints_both_land() {
     server.bind_ws(addr).expect("bind_ws should succeed");
     let url = format!("ws://{}", addr);
 
-    let mut alice = WebsocketClient::connect(
-        &url,
-        Hello {
-            name: "alice".into(),
-            color: RgbColor::new(255, 0, 0),
-        },
-    )
-    .expect("alice connect");
-    let mut bob = WebsocketClient::connect(
-        &url,
-        Hello {
-            name: "bob".into(),
-            color: RgbColor::new(0, 0, 255),
-        },
-    )
-    .expect("bob connect");
+    let mut alice = WebsocketClient::connect(&url, Hello::new("alice", RgbColor::new(255, 0, 0)))
+        .expect("alice connect");
+    let mut bob = WebsocketClient::connect(&url, Hello::new("bob", RgbColor::new(0, 0, 255)))
+        .expect("bob connect");
     let _ = drain(&mut alice);
     let _ = drain(&mut bob);
 

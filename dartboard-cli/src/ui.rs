@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
@@ -27,13 +27,24 @@ const SWATCH_MARGIN_BOTTOM: u16 = 1;
 const PIN_UNPINNED: char = '📌';
 const PIN_PINNED: char = '📍';
 
-fn canvas_style() -> CanvasStyle {
+fn color_for_app(app: &App, color: Color) -> Color {
+    dartboard_tui::constrain_color(color, app.color_mode, app.color_view_mode)
+        .unwrap_or(Color::Reset)
+}
+
+fn user_color_for_app(app: &App, color: dartboard_core::RgbColor) -> Color {
+    color_for_app(app, theme::rat(color))
+}
+
+fn canvas_style(app: &App) -> CanvasStyle {
     CanvasStyle {
-        oob_bg: theme::OOB_BG,
-        default_glyph_fg: theme::TEXT,
-        selection_bg: theme::SELECTION_BG,
-        selection_fg: theme::HIGHLIGHT,
-        floating_bg: theme::FLOAT_BG,
+        oob_bg: color_for_app(app, theme::OOB_BG),
+        default_glyph_fg: color_for_app(app, theme::TEXT),
+        selection_bg: color_for_app(app, theme::SELECTION_BG),
+        selection_fg: color_for_app(app, theme::HIGHLIGHT),
+        floating_bg: color_for_app(app, theme::FLOAT_BG),
+        color_mode: app.color_mode,
+        color_view_mode: app.color_view_mode,
     }
 }
 
@@ -57,6 +68,7 @@ fn floating_view_from<'a>(app: &'a App, floating: &'a FloatingSelection) -> Floa
         width: floating.clipboard.width,
         height: floating.clipboard.height,
         cells: floating.clipboard.cells(),
+        colors: Some(floating.clipboard.colors()),
         anchor: app.cursor,
         transparent: floating.transparent,
         active_color: app.active_user_color(),
@@ -108,7 +120,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         canvas_state = canvas_state.floating(floating_view_from(app, floating));
     }
     frame.render_widget(
-        CanvasWidget::new(&canvas_state).style(canvas_style()),
+        CanvasWidget::new(&canvas_state).style(canvas_style(app)),
         canvas_area,
     );
     let user_list_rect = render_user_list(frame, canvas_area, app);
@@ -143,6 +155,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.emoji_picker_open {
         if let Some(catalog) = app.icon_catalog.as_ref() {
             emoji::picker::render(frame, area, &app.emoji_picker_state, catalog);
+        }
+    }
+
+    constrain_buffer_colors(frame.buffer_mut(), area, app);
+}
+
+fn constrain_buffer_colors(buf: &mut Buffer, area: Rect, app: &App) {
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let cell = &mut buf[(x, y)];
+            cell.fg = color_for_app(app, cell.fg);
+            cell.bg = color_for_app(app, cell.bg);
         }
     }
 }
@@ -304,19 +328,21 @@ fn render_swatch_preview(buf: &mut Buffer, inner: Rect, clipboard: &crate::app::
 
             match clipboard.get(cx, cy) {
                 Some(CellValue::Narrow(ch)) => {
+                    let style = swatch_preview_style(clipboard, cx, cy, preview_style);
                     buf[(inner.x + dx, inner.y + dy)]
                         .set_char(ch)
-                        .set_style(preview_style);
+                        .set_style(style);
                     dx += 1;
                 }
                 Some(CellValue::Wide(ch)) => {
+                    let style = swatch_preview_style(clipboard, cx, cy, preview_style);
                     buf[(inner.x + dx, inner.y + dy)]
                         .set_char(ch)
-                        .set_style(preview_style);
+                        .set_style(style);
                     if dx + 1 < inner.width {
                         buf[(inner.x + dx + 1, inner.y + dy)]
                             .set_char(' ')
-                            .set_style(preview_style);
+                            .set_style(style);
                     }
                     dx += 2;
                 }
@@ -329,6 +355,18 @@ fn render_swatch_preview(buf: &mut Buffer, inner: Rect, clipboard: &crate::app::
             }
         }
     }
+}
+
+fn swatch_preview_style(
+    clipboard: &crate::app::Clipboard,
+    x: usize,
+    y: usize,
+    fallback: Style,
+) -> Style {
+    clipboard
+        .fg(x, y)
+        .map(|fg| fallback.fg(theme::rat(fg)))
+        .unwrap_or(fallback)
 }
 
 fn clipboard_preview_offset(clipboard: &crate::app::Clipboard) -> (usize, usize) {
@@ -427,7 +465,7 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
     let longest_name = app
         .users()
         .iter()
-        .map(|user| user.name.chars().count() as u16)
+        .map(|session| session.user.name.chars().count() as u16)
         .max()
         .unwrap_or(0);
     let width = (longest_name + 2)
@@ -487,21 +525,21 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
             .iter()
             .take(inner.height as usize)
             .enumerate()
-            .map(|(idx, user)| {
-                let label = truncate_label(&user.name, max_name_width.saturating_sub(2));
+            .map(|(idx, session)| {
+                let label = truncate_label(&session.user.name, max_name_width.saturating_sub(2));
                 let line = format!("  {}", label);
                 if idx == app.active_user_index() {
                     Line::from(Span::styled(
                         format!("{:<width$}", line, width = max_name_width),
                         Style::default()
-                            .fg(theme::rat(user.color))
+                            .fg(user_color_for_app(app, session.user.color))
                             .bg(theme::SELECTION_BG)
                             .add_modifier(Modifier::BOLD),
                     ))
                 } else {
                     Line::from(Span::styled(
                         format!("{:<width$}", line, width = max_name_width),
-                        Style::default().fg(theme::rat(user.color)),
+                        Style::default().fg(user_color_for_app(app, session.user.color)),
                     ))
                 }
             })
@@ -675,6 +713,8 @@ fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
         }
         HelpTab::Transform => keymap_help_rows(&entries, KeyMapHelpSection::Transform),
         HelpTab::Session => vec![
+            ("F2", "color mode"),
+            ("F3", "color view mode"),
             ("^Z / ^R", "undo / redo"),
             ("^P", "help toggle"),
             ("^Q", "quit"),

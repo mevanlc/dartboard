@@ -10,7 +10,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use dartboard_core::{
-    Canvas, CanvasOp, Client, ClientMsg, ClientOpId, Peer, RgbColor, Seq, ServerMsg, UserId,
+    validate_user_metadata, Canvas, CanvasOp, Client, ClientMsg, ClientOpId, DartboardUser,
+    RgbColor, Seq, ServerMsg, UserId, UserMetadata,
 };
 use rand::seq::SliceRandom;
 
@@ -90,7 +91,7 @@ struct State {
 }
 
 struct ClientEntry {
-    peer: Peer,
+    user: DartboardUser,
     sender: Box<dyn ServerSink>,
 }
 
@@ -109,6 +110,17 @@ impl ServerSink for LocalSink {
 pub struct Hello {
     pub name: String,
     pub color: RgbColor,
+    pub metadata: UserMetadata,
+}
+
+impl Hello {
+    pub fn new(name: impl Into<String>, color: RgbColor) -> Self {
+        Self {
+            name: name.into(),
+            color,
+            metadata: UserMetadata::new(),
+        }
+    }
 }
 
 /// Outcome of a connect attempt. Rejected connections leave no registered
@@ -169,6 +181,13 @@ impl ServerHandle {
         hello: Hello,
         sender: Box<dyn ServerSink>,
     ) -> Result<UserId, String> {
+        if let Err(reason) = validate_user_metadata(&hello.metadata) {
+            let _ = sender.send(ServerMsg::ConnectRejected {
+                reason: reason.clone(),
+            });
+            return Err(reason);
+        }
+
         let mut state = self.inner.state.lock().unwrap();
         if state.clients.len() >= MAX_PLAYERS {
             let reason = format!(
@@ -184,29 +203,30 @@ impl ServerHandle {
         let user_id = state.next_user_id;
         state.next_user_id += 1;
 
-        let used_colors: Vec<RgbColor> = state.clients.iter().map(|c| c.peer.color).collect();
+        let used_colors: Vec<RgbColor> = state.clients.iter().map(|c| c.user.color).collect();
         let color = select_user_color(state.color_selection_mode, &used_colors);
 
-        let peer = Peer {
+        let user = DartboardUser {
             user_id,
             name: hello.name,
             color,
+            metadata: hello.metadata,
         };
 
         sender.send(ServerMsg::Welcome {
             your_user_id: user_id,
             your_color: color,
-            peers: state.clients.iter().map(|c| c.peer.clone()).collect(),
+            peers: state.clients.iter().map(|c| c.user.clone()).collect(),
             snapshot: state.canvas.clone(),
         });
 
         for entry in &state.clients {
             entry
                 .sender
-                .send(ServerMsg::PeerJoined { peer: peer.clone() });
+                .send(ServerMsg::PeerJoined { peer: user.clone() });
         }
 
-        state.clients.push(ClientEntry { peer, sender });
+        state.clients.push(ClientEntry { user, sender });
         Ok(user_id)
     }
 
@@ -236,7 +256,7 @@ impl ServerHandle {
         store.save(canvas);
 
         for entry in clients.iter() {
-            if entry.peer.user_id == user_id {
+            if entry.user.user_id == user_id {
                 entry.sender.send(ServerMsg::Ack { client_op_id, seq });
             }
             entry.sender.send(ServerMsg::OpBroadcast {
@@ -250,7 +270,7 @@ impl ServerHandle {
     /// Disconnect a previously-registered user and broadcast `PeerLeft`.
     pub fn disconnect_user(&self, user_id: UserId) {
         let mut state = self.inner.state.lock().unwrap();
-        state.clients.retain(|c| c.peer.user_id != user_id);
+        state.clients.retain(|c| c.user.user_id != user_id);
         for entry in &state.clients {
             entry.sender.send(ServerMsg::PeerLeft { user_id });
         }
@@ -322,14 +342,8 @@ mod tests {
     #[test]
     fn welcome_contains_snapshot_and_existing_peers() {
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut alice = server.connect_local(Hello {
-            name: "alice".into(),
-            color: red(),
-        });
-        let mut bob = server.connect_local(Hello {
-            name: "bob".into(),
-            color: blue(),
-        });
+        let mut alice = server.connect_local(Hello::new("alice", red()));
+        let mut bob = server.connect_local(Hello::new("bob", blue()));
 
         let alice_events = drain_events(&mut alice);
         let bob_events = drain_events(&mut bob);
@@ -353,14 +367,8 @@ mod tests {
     #[test]
     fn submit_op_broadcasts_and_acks() {
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut alice = server.connect_local(Hello {
-            name: "alice".into(),
-            color: red(),
-        });
-        let mut bob = server.connect_local(Hello {
-            name: "bob".into(),
-            color: blue(),
-        });
+        let mut alice = server.connect_local(Hello::new("alice", red()));
+        let mut bob = server.connect_local(Hello::new("bob", blue()));
         let _ = drain_events(&mut alice);
         let _ = drain_events(&mut bob);
 
@@ -390,10 +398,7 @@ mod tests {
     #[test]
     fn sequence_numbers_are_monotonic() {
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut client = server.connect_local(Hello {
-            name: "solo".into(),
-            color: red(),
-        });
+        let mut client = server.connect_local(Hello::new("solo", red()));
         let _ = drain_events(&mut client);
 
         client.submit_op(CanvasOp::PaintCell {
@@ -419,10 +424,7 @@ mod tests {
     #[test]
     fn shift_row_op_is_applied_server_side() {
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut client = server.connect_local(Hello {
-            name: "solo".into(),
-            color: red(),
-        });
+        let mut client = server.connect_local(Hello::new("solo", red()));
         let _ = drain_events(&mut client);
 
         client.submit_op(CanvasOp::PaintCell {
@@ -448,14 +450,8 @@ mod tests {
     #[test]
     fn joining_players_get_unique_colors_from_palette() {
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut alice = server.connect_local(Hello {
-            name: "alice".into(),
-            color: red(),
-        });
-        let mut bob = server.connect_local(Hello {
-            name: "bob".into(),
-            color: red(),
-        });
+        let mut alice = server.connect_local(Hello::new("alice", red()));
+        let mut bob = server.connect_local(Hello::new("bob", red()));
 
         let alice_color = match drain_events(&mut alice).into_iter().next() {
             Some(ServerMsg::Welcome { your_color, .. }) => your_color,
@@ -481,16 +477,10 @@ mod tests {
     #[test]
     fn dropping_client_broadcasts_peer_left() {
         let server = ServerHandle::spawn_local(InMemStore);
-        let mut alice = server.connect_local(Hello {
-            name: "alice".into(),
-            color: red(),
-        });
+        let mut alice = server.connect_local(Hello::new("alice", red()));
         let alice_id;
         {
-            let bob = server.connect_local(Hello {
-                name: "bob".into(),
-                color: blue(),
-            });
+            let bob = server.connect_local(Hello::new("bob", blue()));
             alice_id = alice.user_id();
             drop(bob);
         }
@@ -511,21 +501,37 @@ mod tests {
         let server = ServerHandle::spawn_local(InMemStore);
         let mut clients = Vec::new();
         for (i, color) in PLAYER_PALETTE.iter().copied().enumerate().take(MAX_PLAYERS) {
-            clients.push(server.connect_local(Hello {
-                name: format!("peer{i}"),
-                color,
-            }));
+            clients.push(server.connect_local(Hello::new(format!("peer{i}"), color)));
         }
 
-        match server.try_connect_local(Hello {
-            name: "overflow".into(),
-            color: red(),
-        }) {
+        match server.try_connect_local(Hello::new("overflow", red())) {
             ConnectOutcome::Rejected(reason) => {
                 assert!(reason.to_lowercase().contains("full"), "reason: {reason}");
             }
             ConnectOutcome::Accepted(_) => panic!("server should be full"),
         }
         assert_eq!(server.peer_count(), MAX_PLAYERS);
+    }
+
+    #[test]
+    fn oversized_user_metadata_is_rejected() {
+        let server = ServerHandle::spawn_local(InMemStore);
+        let mut metadata = UserMetadata::new();
+        metadata.insert(
+            "external.id".to_string(),
+            "x".repeat(dartboard_core::USER_METADATA_VALUE_MAX_BYTES + 1),
+        );
+
+        match server.try_connect_local(Hello {
+            name: "metadata-heavy".into(),
+            color: red(),
+            metadata,
+        }) {
+            ConnectOutcome::Rejected(reason) => {
+                assert!(reason.contains("metadata"), "reason: {reason}");
+            }
+            ConnectOutcome::Accepted(_) => panic!("oversized metadata should be rejected"),
+        }
+        assert_eq!(server.peer_count(), 0);
     }
 }
