@@ -35,7 +35,7 @@ pub use dartboard_editor::{
     Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
 use dartboard_picker_core::adjust_scroll_offset;
-use dartboard_server::{Hello, InMemStore, LocalClient, ServerHandle};
+use dartboard_server::{CanvasStore, Hello, InMemStore, LocalClient, ServerHandle};
 
 use crate::emoji;
 use crate::input::app_intent_from_crossterm;
@@ -47,6 +47,20 @@ pub use crate::input::{
 use crate::theme;
 
 const UNDO_DEPTH_CAP: usize = 500;
+
+struct InitialCanvasStore {
+    canvas: Canvas,
+}
+
+impl CanvasStore for InitialCanvasStore {
+    fn load(&self) -> Option<Canvas> {
+        Some(self.canvas.clone())
+    }
+
+    fn save(&mut self, canvas: &Canvas) {
+        self.canvas = canvas.clone();
+    }
+}
 
 /// The transport backing a single dartboard session. Embedded runs a
 /// ServerHandle in-process with one LocalClient per local user; Remote
@@ -281,6 +295,31 @@ impl App {
     }
 
     pub fn new_with_color_modes(color_mode: ColorMode, color_view_mode: ColorViewMode) -> Self {
+        Self::new_embedded_with_store(InMemStore, color_mode, color_view_mode)
+    }
+
+    pub fn new_with_initial_canvas_and_color_modes(
+        initial_canvas: Canvas,
+        color_mode: ColorMode,
+        color_view_mode: ColorViewMode,
+    ) -> Self {
+        Self::new_embedded_with_store(
+            InitialCanvasStore {
+                canvas: initial_canvas,
+            },
+            color_mode,
+            color_view_mode,
+        )
+    }
+
+    fn new_embedded_with_store<S>(
+        store: S,
+        color_mode: ColorMode,
+        color_view_mode: ColorViewMode,
+    ) -> Self
+    where
+        S: CanvasStore + 'static,
+    {
         let default_session = UserSession::default();
         let mut users: Vec<LocalSession> = theme::PLAYER_PALETTE
             .iter()
@@ -296,7 +335,7 @@ impl App {
             })
             .collect();
 
-        let server = ServerHandle::spawn_local(InMemStore);
+        let server = ServerHandle::spawn_local(store);
         let mut clients: Vec<ClientBox> = Vec::with_capacity(users.len());
         for local in &mut users {
             let mut client = server.connect_local(Hello {
@@ -317,8 +356,9 @@ impl App {
         }
 
         let current_session = default_session;
+        let canvas = server.canvas_snapshot();
         Self {
-            canvas: Canvas::new(),
+            canvas,
             color_mode,
             color_view_mode,
             cursor: current_session.editor.cursor,
@@ -1413,7 +1453,9 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use dartboard_core::{Canvas, CellValue, Pos, RgbColor, DEFAULT_HEIGHT, DEFAULT_WIDTH};
+    use dartboard_core::{
+        Canvas, CellValue, ColorMode, ColorViewMode, Pos, RgbColor, DEFAULT_HEIGHT, DEFAULT_WIDTH,
+    };
     use dartboard_editor::{Clipboard, FloatingSelection};
     use ratatui::layout::Rect;
 
@@ -1883,6 +1925,29 @@ mod tests {
                 "duplicate player color at index {idx}: {color:?}"
             );
         }
+    }
+
+    #[test]
+    fn initial_canvas_seeds_embedded_app_and_server() {
+        let mut initial = Canvas::new();
+        initial.set_colored(Pos { x: 2, y: 1 }, 'T', RgbColor::new(1, 2, 3));
+
+        let app = App::new_with_initial_canvas_and_color_modes(
+            initial,
+            ColorMode::TrueColor,
+            ColorViewMode::NearestMapped,
+        );
+
+        assert_eq!(app.canvas.get(Pos { x: 2, y: 1 }), 'T');
+        assert_eq!(
+            app.canvas.fg(Pos { x: 2, y: 1 }),
+            Some(RgbColor::new(1, 2, 3))
+        );
+        assert_eq!(app.server_snapshot_for_test().get(Pos { x: 2, y: 1 }), 'T');
+        assert_eq!(
+            app.server_snapshot_for_test().fg(Pos { x: 2, y: 1 }),
+            Some(RgbColor::new(1, 2, 3))
+        );
     }
 
     #[test]

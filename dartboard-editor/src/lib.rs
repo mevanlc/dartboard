@@ -42,12 +42,14 @@ use std::collections::HashSet;
 use dartboard_core::{ops::CellWrite, Canvas, CanvasOp, CellValue, Pos, RgbColor};
 
 pub mod keymap;
+pub mod raw_import;
 pub mod session_mirror;
 
 pub use keymap::{
     ActionSpec, BindingContext, EditorContext, HelpEntry, HelpSection, KeyBinding, KeyMap,
     KeyTrigger,
 };
+pub use raw_import::{import_terminal_raw, RawImportStats};
 pub use session_mirror::{ConnectState, MirrorEvent, SessionMirror};
 
 pub const SWATCH_CAPACITY: usize = 5;

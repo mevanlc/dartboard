@@ -11,7 +11,8 @@ use crossterm::terminal::{
 };
 use dartboard_cli::{app::App, theme, ui};
 use dartboard_client_ws::{Hello, WebsocketClient};
-use dartboard_core::{ColorMode, ColorViewMode, RgbColor};
+use dartboard_core::{Canvas, ColorMode, ColorViewMode, Pos, RgbColor};
+use dartboard_editor::import_terminal_raw;
 use dartboard_server::{InMemStore, ServerHandle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -28,6 +29,7 @@ struct Args {
     user_color: Option<RgbColor>,
     color_mode: ColorMode,
     color_view_mode: ColorViewMode,
+    read_raw: Option<std::path::PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -36,6 +38,7 @@ fn parse_args() -> Result<Args, String> {
     let mut user_color: Option<RgbColor> = None;
     let mut color_mode: Option<ColorMode> = None;
     let mut color_view_mode: Option<ColorViewMode> = None;
+    let mut read_raw: Option<std::path::PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -67,6 +70,10 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or("--color-view-mode needs <hide-unmapped|nearest-mapped>")?;
                 color_view_mode = Some(value.parse()?);
             }
+            "--read-raw" => {
+                let path = args.next().ok_or("--read-raw needs <filename>")?;
+                read_raw = Some(path.into());
+            }
             other => return Err(format!("unknown flag: {}", other)),
         }
     }
@@ -75,6 +82,9 @@ fn parse_args() -> Result<Args, String> {
     if !matches!(mode, Mode::Connect(_)) && (user_name.is_some() || user_color.is_some()) {
         return Err("--user / --user-color only apply to --connect".to_string());
     }
+    if read_raw.is_some() && !matches!(mode, Mode::Embedded) {
+        return Err("--read-raw only applies to embedded mode".to_string());
+    }
 
     Ok(Args {
         mode,
@@ -82,6 +92,7 @@ fn parse_args() -> Result<Args, String> {
         user_color,
         color_mode: color_mode.unwrap_or_else(detect_color_mode),
         color_view_mode: color_view_mode.unwrap_or_default(),
+        read_raw,
     })
 }
 
@@ -119,6 +130,7 @@ OPTIONS (--connect only):
 OPTIONS:
   --color-mode <mode>             16, 256, or truecolor (default: env-detected)
   --color-view-mode <mode>        hide-unmapped or nearest-mapped
+  --read-raw <filename>           seed embedded canvas from raw terminal text
 
 FLAGS:
   -h, --help                      show this message
@@ -134,10 +146,26 @@ fn main() -> io::Result<()> {
     };
 
     match args.mode {
-        Mode::Embedded => run_tui(App::new_with_color_modes(
-            args.color_mode,
-            args.color_view_mode,
-        )),
+        Mode::Embedded => {
+            let app = if let Some(path) = args.read_raw {
+                let bytes = std::fs::read(&path)?;
+                let mut canvas = Canvas::new();
+                import_terminal_raw(
+                    &mut canvas,
+                    &bytes,
+                    Pos { x: 0, y: 0 },
+                    theme::DEFAULT_GLYPH_FG,
+                );
+                App::new_with_initial_canvas_and_color_modes(
+                    canvas,
+                    args.color_mode,
+                    args.color_view_mode,
+                )
+            } else {
+                App::new_with_color_modes(args.color_mode, args.color_view_mode)
+            };
+            run_tui(app)
+        }
         Mode::Connect(url) => {
             let hello = Hello::new(
                 args.user_name
