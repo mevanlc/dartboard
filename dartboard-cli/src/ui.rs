@@ -6,7 +6,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, FloatingSelection, HelpTab, Swatch, SWATCH_CAPACITY};
+use crate::app::{
+    App, FloatingSelection, HelpTab, SaveDialog, SaveDialogMode, SaveFocus, SaveFormat, Swatch,
+    SWATCH_CAPACITY,
+};
 use crate::emoji;
 use crate::theme;
 use dartboard_core::CellValue;
@@ -129,6 +132,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Cursor position
     let cursor_visible = !app.show_help
         && !app.emoji_picker_open
+        && app.save_dialog.is_none()
         && app.cursor.x >= app.viewport_origin.x
         && app.cursor.y >= app.viewport_origin.y
         && app.cursor.x < app.viewport_origin.x + canvas_area.width as usize
@@ -156,6 +160,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some(catalog) = app.icon_catalog.as_ref() {
             emoji::picker::render(frame, area, &app.emoji_picker_state, catalog);
         }
+    }
+
+    if let Some(save_dialog) = app.save_dialog.as_ref() {
+        render_save_dialog(frame, area, save_dialog);
     }
 
     constrain_buffer_colors(frame.buffer_mut(), area, app);
@@ -405,6 +413,202 @@ fn cell_is_visible(cell: Option<CellValue>) -> bool {
         Some(CellValue::WideCont) => true,
         None => false,
     }
+}
+
+fn render_save_dialog(frame: &mut Frame, area: Rect, dialog: &SaveDialog) {
+    let width = 64u16.min(area.width.saturating_sub(4)).max(20);
+    let height = 10u16.min(area.height.saturating_sub(2)).max(7);
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(Span::styled(
+            " Save as... ",
+            Style::default().fg(theme::HIGHLIGHT),
+        ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width < 12 || inner.height < 5 {
+        return;
+    }
+
+    let label_style = Style::default().fg(theme::MUTED);
+    let value_style = Style::default().fg(theme::TEXT);
+    let row_x = inner.x + 2.min(inner.width.saturating_sub(1));
+    let label_width = 9u16.min(inner.width);
+    let value_x = row_x.saturating_add(label_width);
+    let value_width = inner
+        .x
+        .saturating_add(inner.width)
+        .saturating_sub(value_x)
+        .saturating_sub(2);
+
+    let type_y = inner.y + 1.min(inner.height.saturating_sub(1));
+    render_label(frame, row_x, type_y, "Type", label_style);
+    render_type_selector(frame, value_x, type_y, value_width, dialog);
+
+    let name_y = type_y.saturating_add(2);
+    if name_y < inner.y + inner.height {
+        render_label(frame, row_x, name_y, "Name", label_style);
+        let cursor_x = render_name_field(frame, value_x, name_y, value_width, dialog);
+        if dialog.focus == SaveFocus::Name && dialog.mode == SaveDialogMode::Editing {
+            frame.set_cursor_position((cursor_x, name_y));
+        }
+    }
+
+    let output_y = name_y.saturating_add(2);
+    if output_y < inner.y + inner.height {
+        render_label(frame, row_x, output_y, "Output", label_style);
+        let path = dialog.resolved_path().display().to_string();
+        let display = dialog.error.as_deref().unwrap_or(&path);
+        let style = if dialog.error.is_some() {
+            Style::default().fg(theme::ERROR)
+        } else {
+            value_style
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate_display(display, value_width as usize),
+                style,
+            )),
+            Rect::new(value_x, output_y, value_width, 1),
+        );
+    }
+
+    if dialog.mode == SaveDialogMode::ConfirmOverwrite {
+        render_overwrite_dialog(frame, area, dialog);
+    } else {
+        let footer_y = inner.y + inner.height.saturating_sub(1);
+        render_save_footer(frame, inner.x, footer_y, inner.width);
+    }
+}
+
+fn render_save_footer(frame: &mut Frame, x: u16, y: u16, width: u16) {
+    let line = Line::from(vec![
+        Span::styled(" Tab", Style::default().fg(theme::ACCENT)),
+        Span::styled(" focus ", Style::default().fg(theme::MUTED)),
+        Span::styled("Enter", Style::default().fg(theme::ACCENT)),
+        Span::styled(" confirm ", Style::default().fg(theme::MUTED)),
+        Span::styled("Escape", Style::default().fg(theme::ACCENT)),
+        Span::styled(" cancel", Style::default().fg(theme::MUTED)),
+    ]);
+    frame.render_widget(Paragraph::new(line), Rect::new(x, y, width, 1));
+}
+
+fn render_label(frame: &mut Frame, x: u16, y: u16, label: &'static str, style: Style) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(label, style)),
+        Rect::new(x, y, display_width(label) as u16, 1),
+    );
+}
+
+fn render_type_selector(frame: &mut Frame, x: u16, y: u16, width: u16, dialog: &SaveDialog) {
+    let mut spans = vec![Span::styled("<- [ ", Style::default().fg(theme::MUTED))];
+    for (idx, format) in SaveFormat::ALL.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(" | ", Style::default().fg(theme::MUTED)));
+        }
+        let selected = *format == dialog.format;
+        let focused = dialog.focus == SaveFocus::Type && dialog.mode == SaveDialogMode::Editing;
+        let style = if selected && focused {
+            Style::default()
+                .fg(theme::HIGHLIGHT)
+                .add_modifier(Modifier::BOLD)
+        } else if selected {
+            Style::default().fg(theme::ACCENT)
+        } else {
+            Style::default().fg(theme::TEXT)
+        };
+        spans.push(Span::styled(format.label(), style));
+    }
+    spans.push(Span::styled(" ] ->", Style::default().fg(theme::MUTED)));
+    frame.render_widget(Paragraph::new(Line::from(spans)), Rect::new(x, y, width, 1));
+}
+
+fn render_name_field(frame: &mut Frame, x: u16, y: u16, width: u16, dialog: &SaveDialog) -> u16 {
+    if width == 0 {
+        return x;
+    }
+    let text_width = width.saturating_sub(1) as usize;
+    let name = truncate_display(&dialog.name, text_width);
+    let pad = text_width.saturating_sub(display_width(&name));
+    let mut field = String::new();
+    field.push_str(&name);
+    field.push_str(&"_".repeat(pad));
+    let style = if dialog.focus == SaveFocus::Name && dialog.mode == SaveDialogMode::Editing {
+        Style::default().fg(theme::HIGHLIGHT)
+    } else {
+        Style::default().fg(theme::TEXT)
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(field, style)),
+        Rect::new(x, y, width, 1),
+    );
+    let cursor_display = display_width(
+        &dialog
+            .name
+            .chars()
+            .take(dialog.name_cursor)
+            .collect::<String>(),
+    );
+    x + (cursor_display as u16).min(width.saturating_sub(1))
+}
+
+fn render_overwrite_dialog(frame: &mut Frame, area: Rect, dialog: &SaveDialog) {
+    let width = 52u16.min(area.width.saturating_sub(6)).max(24);
+    let height = 7u16.min(area.height.saturating_sub(4)).max(5);
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let popup = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HIGHLIGHT))
+        .title(Span::styled(
+            " Overwrite file? ",
+            Style::default().fg(theme::HIGHLIGHT),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height == 0 {
+        return;
+    }
+    let path = dialog.resolved_path().display().to_string();
+    let lines = Text::from(vec![
+        Line::from(Span::styled(
+            " File already exists.",
+            Style::default().fg(theme::TEXT),
+        )),
+        Line::from(Span::styled(
+            truncate_display(&path, inner.width.saturating_sub(2) as usize),
+            Style::default().fg(theme::MUTED),
+        )),
+    ]);
+    frame.render_widget(Paragraph::new(lines), inner);
+    render_overwrite_footer(
+        frame,
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+    );
+}
+
+fn render_overwrite_footer(frame: &mut Frame, x: u16, y: u16, width: u16) {
+    let line = Line::from(vec![
+        Span::styled(" Enter", Style::default().fg(theme::ACCENT)),
+        Span::styled(" overwrite ", Style::default().fg(theme::MUTED)),
+        Span::styled("Escape", Style::default().fg(theme::ACCENT)),
+        Span::styled(" cancel", Style::default().fg(theme::MUTED)),
+    ]);
+    frame.render_widget(Paragraph::new(line), Rect::new(x, y, width, 1));
 }
 
 fn render_pan_indicators(buf: &mut Buffer, area: Rect, app: &App, title_cols: u16) {
@@ -715,6 +919,7 @@ fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
         HelpTab::Session => vec![
             ("F2", "color mode"),
             ("F3", "color view mode"),
+            ("^S", "save artboard"),
             ("^Z / ^R", "undo / redo"),
             ("^P", "help toggle"),
             ("^Q", "quit"),

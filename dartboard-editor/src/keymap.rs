@@ -422,8 +422,8 @@ fn default_standalone_bindings() -> Vec<KeyBinding> {
         description: "activate swatch slot",
         help: help(
             HelpSection::Clipboard,
-            "^A/^S/^D/^F/^G",
-            "lift swatch 1..5",
+            "^A/^D/^F/^G",
+            "lift swatch slots",
             50,
         ),
     });

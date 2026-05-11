@@ -1,4 +1,5 @@
 use std::io;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::Event;
 #[cfg(test)]
@@ -10,8 +11,8 @@ use dartboard_client_ws::WebsocketClient;
 #[cfg(test)]
 use dartboard_core::UserId;
 use dartboard_core::{
-    Canvas, CanvasOp, Client, ClientOpId, ColorMode, ColorViewMode, DartboardUser, Pos, RgbColor,
-    ServerMsg, UserMetadata,
+    Canvas, CanvasOp, CellValue, Client, ClientOpId, ColorMode, ColorViewMode, DartboardUser, Pos,
+    RgbColor, ServerMsg, UserMetadata,
 };
 #[cfg(test)]
 use dartboard_editor::{
@@ -30,9 +31,10 @@ use dartboard_editor::{
     MirrorEvent, PointerStrokeHint, SessionMirror,
 };
 pub use dartboard_editor::{
-    Clipboard, ConnectState, EditorAction, EditorContext, EditorPointerDispatch, EditorSession,
-    FloatingSelection, HostEffect, KeyMap, Mode, MoveDir, PanDrag, Selection, SelectionShape,
-    Swatch, SwatchActivation, Viewport, SWATCH_CAPACITY,
+    export_bounds_as_text as editor_export_bounds_as_text, Bounds, Clipboard, ConnectState,
+    EditorAction, EditorContext, EditorPointerDispatch, EditorSession, FloatingSelection,
+    HostEffect, KeyMap, Mode, MoveDir, PanDrag, Selection, SelectionShape, Swatch,
+    SwatchActivation, Viewport, SWATCH_CAPACITY,
 };
 use dartboard_picker_core::adjust_scroll_offset;
 use dartboard_server::{CanvasStore, Hello, InMemStore, LocalClient, ServerHandle};
@@ -101,6 +103,107 @@ impl Client for ClientBox {
 pub enum SwatchZone {
     Body,
     Pin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveFormat {
+    Text,
+    Json,
+    Raw,
+}
+
+impl SaveFormat {
+    pub const ALL: [Self; 3] = [Self::Text, Self::Json, Self::Raw];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "Text",
+            Self::Json => "JSON",
+            Self::Raw => "Raw",
+        }
+    }
+
+    fn default_name(self) -> &'static str {
+        match self {
+            Self::Text => "dartboard.txt",
+            Self::Json => "dartboard.json",
+            Self::Raw => "dartboard.raw",
+        }
+    }
+
+    fn next(self) -> Self {
+        let idx = Self::ALL
+            .iter()
+            .position(|format| *format == self)
+            .unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    fn prev(self) -> Self {
+        let idx = Self::ALL
+            .iter()
+            .position(|format| *format == self)
+            .unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveFocus {
+    Type,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveDialogMode {
+    Editing,
+    ConfirmOverwrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveDialog {
+    pub format: SaveFormat,
+    pub focus: SaveFocus,
+    pub mode: SaveDialogMode,
+    pub name: String,
+    pub name_cursor: usize,
+    pub error: Option<String>,
+}
+
+impl Default for SaveDialog {
+    fn default() -> Self {
+        let format = SaveFormat::Text;
+        let name = format.default_name().to_string();
+        Self {
+            format,
+            focus: SaveFocus::Name,
+            mode: SaveDialogMode::Editing,
+            name_cursor: name.chars().count(),
+            name,
+            error: None,
+        }
+    }
+}
+
+impl SaveDialog {
+    pub fn resolved_path(&self) -> PathBuf {
+        resolve_save_name(&self.name, self.format)
+    }
+
+    fn cycle_format(&mut self, next: bool) {
+        let old_default = self.format.default_name();
+        let was_default = self.name == old_default;
+        self.format = if next {
+            self.format.next()
+        } else {
+            self.format.prev()
+        };
+        if was_default {
+            self.name = self.format.default_name().to_string();
+            self.name_cursor = self.name.chars().count();
+        }
+        self.error = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -191,6 +294,7 @@ pub struct App {
     pub swatch_pin_hits: [Option<Rect>; SWATCH_CAPACITY],
     pub help_tab_hits: Vec<(HelpTab, Rect)>,
     pub help_scroll: u16,
+    pub save_dialog: Option<SaveDialog>,
     paint_canvas_before: Option<Canvas>,
     paint_stroke_anchor: Option<Pos>,
     paint_stroke_last: Option<Pos>,
@@ -381,6 +485,7 @@ impl App {
             swatch_pin_hits: [None; SWATCH_CAPACITY],
             help_tab_hits: Vec::new(),
             help_scroll: 0,
+            save_dialog: None,
             paint_canvas_before: current_session.paint_canvas_before,
             paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
             paint_stroke_last: current_session.editor.paint_stroke_last,
@@ -452,6 +557,7 @@ impl App {
             swatch_pin_hits: [None; SWATCH_CAPACITY],
             help_tab_hits: Vec::new(),
             help_scroll: 0,
+            save_dialog: None,
             paint_canvas_before: current_session.paint_canvas_before,
             paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
             paint_stroke_last: current_session.editor.paint_stroke_last,
@@ -1184,6 +1290,10 @@ impl App {
                 Vec::new()
             }
             AppIntent::Paste(data) => {
+                if self.save_dialog.is_some() {
+                    self.handle_save_paste(&data);
+                    return Vec::new();
+                }
                 if !self.show_help {
                     self.paste_text_block(&data);
                 }
@@ -1193,6 +1303,20 @@ impl App {
     }
 
     fn handle_key_input(&mut self, key: AppKey) -> Vec<HostEffect> {
+        if key.code == AppKeyCode::Char('q') && key.modifiers.ctrl {
+            return vec![HostEffect::RequestQuit];
+        }
+
+        if self.save_dialog.is_some() {
+            self.handle_save_key(key);
+            return Vec::new();
+        }
+
+        if key.code == AppKeyCode::Char('s') && key.modifiers.ctrl {
+            self.save_dialog = Some(SaveDialog::default());
+            return Vec::new();
+        }
+
         if Self::is_open_picker_key(key) {
             self.open_emoji_picker();
             return Vec::new();
@@ -1201,10 +1325,6 @@ impl App {
         if self.emoji_picker_open {
             self.handle_picker_key(key);
             return Vec::new();
-        }
-
-        if key.code == AppKeyCode::Char('q') && key.modifiers.ctrl {
-            return vec![HostEffect::RequestQuit];
         }
 
         if key.code == AppKeyCode::F(2) {
@@ -1267,6 +1387,10 @@ impl App {
     }
 
     fn handle_pointer_input(&mut self, mouse: AppPointerEvent) {
+        if self.save_dialog.is_some() {
+            return;
+        }
+
         if self.emoji_picker_open {
             self.handle_picker_mouse(mouse);
             return;
@@ -1313,6 +1437,155 @@ impl App {
         if matches!(dispatch.stroke_hint, Some(PointerStrokeHint::End)) {
             self.end_paint_stroke();
         }
+    }
+
+    fn handle_save_key(&mut self, key: AppKey) {
+        let Some(mut dialog) = self.save_dialog.take() else {
+            return;
+        };
+
+        match dialog.mode {
+            SaveDialogMode::ConfirmOverwrite => match key.code {
+                AppKeyCode::Enter | AppKeyCode::Char('y') | AppKeyCode::Char('Y') => {
+                    if let Err(err) = self.write_save_dialog(&dialog, true) {
+                        dialog.error = Some(err.to_string());
+                        dialog.mode = SaveDialogMode::Editing;
+                        self.save_dialog = Some(dialog);
+                    }
+                }
+                AppKeyCode::Esc | AppKeyCode::Char('n') | AppKeyCode::Char('N') => {
+                    dialog.mode = SaveDialogMode::Editing;
+                    dialog.error = None;
+                    self.save_dialog = Some(dialog);
+                }
+                _ => self.save_dialog = Some(dialog),
+            },
+            SaveDialogMode::Editing => match key.code {
+                AppKeyCode::Esc => {}
+                AppKeyCode::Tab | AppKeyCode::BackTab => {
+                    dialog.focus = match dialog.focus {
+                        SaveFocus::Type => SaveFocus::Name,
+                        SaveFocus::Name => SaveFocus::Type,
+                    };
+                    dialog.error = None;
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Enter => {
+                    if dialog.name.trim().is_empty() {
+                        dialog.error = Some("name is required".to_string());
+                        self.save_dialog = Some(dialog);
+                    } else if dialog.resolved_path().exists() {
+                        dialog.mode = SaveDialogMode::ConfirmOverwrite;
+                        dialog.error = None;
+                        self.save_dialog = Some(dialog);
+                    } else if let Err(err) = self.write_save_dialog(&dialog, false) {
+                        dialog.error = Some(err.to_string());
+                        self.save_dialog = Some(dialog);
+                    }
+                }
+                AppKeyCode::Left if dialog.focus == SaveFocus::Type => {
+                    dialog.cycle_format(false);
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Right if dialog.focus == SaveFocus::Type => {
+                    dialog.cycle_format(true);
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Left if dialog.focus == SaveFocus::Name => {
+                    dialog.name_cursor = dialog.name_cursor.saturating_sub(1);
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Right if dialog.focus == SaveFocus::Name => {
+                    dialog.name_cursor = (dialog.name_cursor + 1).min(dialog.name.chars().count());
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Home if dialog.focus == SaveFocus::Name => {
+                    dialog.name_cursor = 0;
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::End if dialog.focus == SaveFocus::Name => {
+                    dialog.name_cursor = dialog.name.chars().count();
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Backspace if dialog.focus == SaveFocus::Name => {
+                    if dialog.name_cursor > 0 {
+                        let byte_idx = char_to_byte_idx(&dialog.name, dialog.name_cursor - 1);
+                        dialog.name.remove(byte_idx);
+                        dialog.name_cursor -= 1;
+                        dialog.error = None;
+                    }
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Delete if dialog.focus == SaveFocus::Name => {
+                    if dialog.name_cursor < dialog.name.chars().count() {
+                        let byte_idx = char_to_byte_idx(&dialog.name, dialog.name_cursor);
+                        dialog.name.remove(byte_idx);
+                        dialog.error = None;
+                    }
+                    self.save_dialog = Some(dialog);
+                }
+                AppKeyCode::Char(ch)
+                    if dialog.focus == SaveFocus::Name
+                        && !key.modifiers.ctrl
+                        && !key.modifiers.alt
+                        && !key.modifiers.meta
+                        && !ch.is_control() =>
+                {
+                    let byte_idx = char_to_byte_idx(&dialog.name, dialog.name_cursor);
+                    dialog.name.insert(byte_idx, ch);
+                    dialog.name_cursor += 1;
+                    dialog.error = None;
+                    self.save_dialog = Some(dialog);
+                }
+                _ => self.save_dialog = Some(dialog),
+            },
+        }
+    }
+
+    fn handle_save_paste(&mut self, data: &str) {
+        let Some(dialog) = self.save_dialog.as_mut() else {
+            return;
+        };
+        if dialog.mode != SaveDialogMode::Editing || dialog.focus != SaveFocus::Name {
+            return;
+        }
+        let pasted: String = data.chars().filter(|ch| !ch.is_control()).collect();
+        if pasted.is_empty() {
+            return;
+        }
+        let byte_idx = char_to_byte_idx(&dialog.name, dialog.name_cursor);
+        dialog.name.insert_str(byte_idx, &pasted);
+        dialog.name_cursor += pasted.chars().count();
+        dialog.error = None;
+    }
+
+    fn write_save_dialog(&self, dialog: &SaveDialog, overwrite: bool) -> io::Result<()> {
+        let path = dialog.resolved_path();
+        if dialog.name.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "name is required",
+            ));
+        }
+        if path.exists() && !overwrite {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "file exists"));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.save_bytes(dialog.format)?)
+    }
+
+    fn save_bytes(&self, format: SaveFormat) -> io::Result<Vec<u8>> {
+        match format {
+            SaveFormat::Text => Ok(self.save_text().into_bytes()),
+            SaveFormat::Json => serde_json::to_vec_pretty(&self.canvas).map_err(io::Error::other),
+            SaveFormat::Raw => Ok(export_canvas_as_raw(&self.canvas).into_bytes()),
+        }
+    }
+
+    fn save_text(&self) -> String {
+        editor_export_bounds_as_text(&self.canvas, full_canvas_bounds(&self.canvas))
     }
 
     fn handle_key_press(&mut self, key: AppKey) -> Vec<HostEffect> {
@@ -1433,6 +1706,84 @@ fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
     col >= rect.x && row >= rect.y && col < rect.x + rect.width && row < rect.y + rect.height
 }
 
+fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn resolve_save_name(name: &str, format: SaveFormat) -> PathBuf {
+    let trimmed = name.trim();
+    let name = if trimmed.is_empty() {
+        format.default_name()
+    } else {
+        trimmed
+    };
+    if let Some(rest) = name.strip_prefix("~/") {
+        return home_dir().join(rest);
+    }
+    let path = Path::new(name);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        home_dir().join(path)
+    }
+}
+
+fn full_canvas_bounds(canvas: &Canvas) -> Bounds {
+    Bounds {
+        min_x: 0,
+        max_x: canvas.width.saturating_sub(1),
+        min_y: 0,
+        max_y: canvas.height.saturating_sub(1),
+    }
+}
+
+fn export_canvas_as_raw(canvas: &Canvas) -> String {
+    let mut out = String::new();
+    let mut current_fg: Option<RgbColor> = None;
+
+    for y in 0..canvas.height {
+        for x in 0..canvas.width {
+            let pos = Pos { x, y };
+            match canvas.cell(pos) {
+                Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
+                    let fg = canvas.fg(pos);
+                    if fg != current_fg {
+                        match fg {
+                            Some(color) => {
+                                out.push_str(&format!(
+                                    "\x1b[38:2:{}:{}:{}m",
+                                    color.r, color.g, color.b
+                                ));
+                            }
+                            None => out.push_str("\x1b[m"),
+                        }
+                        current_fg = fg;
+                    }
+                    out.push(ch);
+                }
+                Some(CellValue::WideCont) => {}
+                None => out.push(' '),
+            }
+        }
+        if y + 1 < canvas.height {
+            out.push('\n');
+        }
+    }
+    if current_fg.is_some() {
+        out.push_str("\x1b[m");
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FloatingOutcome {
     Consumed,
@@ -1448,7 +1799,8 @@ fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
 mod tests {
     use super::{
         App, AppIntent, AppKey, AppKeyCode, AppModifiers, AppPointerEvent, AppPointerKind, HelpTab,
-        HostEffect, Mode, SelectionShape, SWATCH_CAPACITY,
+        HostEffect, Mode, SaveDialog, SaveDialogMode, SaveFocus, SaveFormat, SelectionShape,
+        SWATCH_CAPACITY,
     };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1791,6 +2143,84 @@ mod tests {
 
         assert_eq!(effects, vec![HostEffect::RequestQuit]);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_s_opens_save_dialog_before_swatch_activation() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        app.cursor = Pos { x: 0, y: 0 };
+        app.copy_selection_or_cell();
+
+        let effects = app.handle_intent(AppIntent::KeyPress(AppKey {
+            code: AppKeyCode::Char('s'),
+            modifiers: AppModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        }));
+
+        assert!(effects.is_empty());
+        assert!(app.save_dialog.is_some());
+        assert!(app.floating.is_none());
+    }
+
+    #[test]
+    fn save_dialog_relative_names_resolve_against_home() {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let dialog = SaveDialog {
+            name: "dartboard-test/out.txt".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(dialog.resolved_path(), home.join("dartboard-test/out.txt"));
+    }
+
+    #[test]
+    fn save_dialog_requires_confirmation_before_overwriting() {
+        let mut app = App::new();
+        app.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        let path = std::env::temp_dir().join(format!(
+            "dartboard-save-overwrite-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "old").unwrap();
+        let name = path.display().to_string();
+
+        app.save_dialog = Some(SaveDialog {
+            format: SaveFormat::Text,
+            focus: SaveFocus::Name,
+            mode: SaveDialogMode::Editing,
+            name: name.clone(),
+            name_cursor: name.chars().count(),
+            error: None,
+        });
+
+        app.handle_save_key(AppKey {
+            code: AppKeyCode::Enter,
+            modifiers: AppModifiers::default(),
+        });
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        assert_eq!(
+            app.save_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(SaveDialogMode::ConfirmOverwrite)
+        );
+
+        app.handle_save_key(AppKey {
+            code: AppKeyCode::Enter,
+            modifiers: AppModifiers::default(),
+        });
+
+        assert!(app.save_dialog.is_none());
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with('A'));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
