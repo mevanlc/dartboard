@@ -108,6 +108,8 @@ The TUI exposes these core controls in its built-in help:
 - double-click a glyph to sample it as a transparent brush
 - right-drag or `Alt` + arrows / `Ctrl` + `Shift` + arrows to pan
 - `Ctrl+C`, `Ctrl+X`, `Ctrl+V` for swatch-based copy/cut/paste
+- bracketed paste, or a burst of more than 3 text characters within 50 ms, captures the text as the newest swatch and arms it as a stamp
+- `Ctrl+J` is equivalent to `Enter`, including for stamping and line movement
 - `Alt+C` to export text to the system clipboard
 - `Ctrl+Z` / `Ctrl+R` for undo / redo
 - `Ctrl+U` / `Ctrl+Y` for the previous / next local paint color

@@ -921,7 +921,16 @@ fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
     let entries = keymap_help_entries();
     match tab {
         HelpTab::Guide => Vec::new(),
-        HelpTab::Drawing => keymap_help_rows(&entries, KeyMapHelpSection::Drawing),
+        HelpTab::Drawing => keymap_help_rows(&entries, KeyMapHelpSection::Drawing)
+            .into_iter()
+            .map(|(keys, description)| {
+                if keys == "enter" {
+                    ("enter / ^J", description)
+                } else {
+                    (keys, description)
+                }
+            })
+            .collect(),
         HelpTab::Selection => {
             let mut rows = keymap_help_rows(&entries, KeyMapHelpSection::Selection);
             rows.extend([
@@ -933,13 +942,23 @@ fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
             rows
         }
         HelpTab::Clipboard => {
-            let mut rows = keymap_help_rows(&entries, KeyMapHelpSection::Clipboard);
+            let mut rows: Vec<_> = keymap_help_rows(&entries, KeyMapHelpSection::Clipboard)
+                .into_iter()
+                .map(|(keys, description)| {
+                    if keys == "enter" {
+                        ("enter / ^J", description)
+                    } else {
+                        (keys, description)
+                    }
+                })
+                .collect();
+            rows.push(("bracketed / burst paste", "capture as newest stamp"));
             rows.push(("📌", "pin"));
             rows
         }
         HelpTab::Transform => keymap_help_rows(&entries, KeyMapHelpSection::Transform)
             .into_iter()
-            .filter(|(keys, _)| !matches!(*keys, "^U" | "^Y"))
+            .filter(|(keys, _)| !matches!(*keys, "^J" | "^U" | "^Y"))
             .collect(),
         HelpTab::Session => vec![
             ("F2", "color mode"),
@@ -960,6 +979,7 @@ const GUIDE_PROSE: &[&str] = &[
     "Type to fill the selection. Use ^X / ^C / ^V to cut / copy",
     "/ paste into one of five swatches. Click a swatch to use it",
     "as a brush.",
+    "Pasted text is captured as the newest stamp; enter / ^J stamps it.",
     "Double-click a canvas glyph to sample a transparent brush.",
     "",
     "^U / ^Y changes your local paint color.  ^] opens the glyph picker.",

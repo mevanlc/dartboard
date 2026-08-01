@@ -1,6 +1,6 @@
 use std::io::{self, Stdout};
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
@@ -10,7 +10,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use dartboard_cli::{app::App, theme, ui};
+use dartboard_cli::{app::App, input::PasteTrap, theme, ui};
 use dartboard_client_ws::{Hello, WebsocketClient};
 use dartboard_core::{Canvas, ColorMode, ColorViewMode, Pos, RgbColor};
 use dartboard_editor::import_terminal_raw;
@@ -270,18 +270,25 @@ fn run_tui(mut app: App) -> io::Result<()> {
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+    let mut paste_trap = PasteTrap::default();
 
     terminal.draw(|frame| ui::draw(frame, app))?;
     execute!(io::stdout(), SetCursorStyle::SteadyUnderScore)?;
 
     loop {
-        let redraw = if crossterm::event::poll(EVENT_POLL_INTERVAL)? {
+        let mut redraw = false;
+        if crossterm::event::poll(EVENT_POLL_INTERVAL)? {
             let event = crossterm::event::read()?;
+            for event in paste_trap.push(event, Instant::now()) {
+                app.handle_event(event);
+                redraw = true;
+            }
+        }
+        for event in paste_trap.flush_expired(Instant::now()) {
             app.handle_event(event);
-            true
-        } else {
-            app.tick()
-        };
+            redraw = true;
+        }
+        redraw |= app.tick();
 
         if app.should_quit {
             return Ok(());

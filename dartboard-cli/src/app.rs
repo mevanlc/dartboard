@@ -25,11 +25,13 @@ use dartboard_editor::{
     paste_primary_swatch as editor_paste_primary_swatch, smart_fill as editor_smart_fill,
 };
 use dartboard_editor::{
-    capture_bounds as editor_capture_bounds, diff_canvas_op as editor_diff_canvas_op,
-    dismiss_floating as editor_dismiss_floating, end_paint_stroke as editor_end_paint_stroke,
-    handle_editor_action as editor_handle_action, handle_editor_pointer as editor_handle_pointer,
-    insert_char as editor_insert_char, paste_text_block as editor_paste_text_block,
-    stamp_floating as editor_stamp_floating, MirrorEvent, PointerStrokeHint, SessionMirror,
+    capture_bounds as editor_capture_bounds,
+    capture_bounds_without_color as editor_capture_bounds_without_color,
+    diff_canvas_op as editor_diff_canvas_op, dismiss_floating as editor_dismiss_floating,
+    end_paint_stroke as editor_end_paint_stroke, handle_editor_action as editor_handle_action,
+    handle_editor_pointer as editor_handle_pointer, insert_char as editor_insert_char,
+    paste_text_block as editor_paste_text_block, stamp_floating as editor_stamp_floating,
+    MirrorEvent, PointerStrokeHint, SessionMirror,
 };
 pub use dartboard_editor::{
     export_bounds_as_text as editor_export_bounds_as_text, Bounds, Clipboard, ConnectState,
@@ -1265,14 +1267,60 @@ impl App {
         }
     }
 
-    fn paste_text_block(&mut self, text: &str) {
-        let color = self.active_paint_color();
-        let before = self.canvas.clone();
-        let editor = self.editor_session_snapshot();
-        let changed = editor_paste_text_block(&editor, &mut self.canvas, text, color);
-        if changed {
-            self.finish_canvas_edit(before);
+    fn clipboard_from_paste(&self, text: &str) -> Option<Clipboard> {
+        let normalized = normalize_paste_line_endings(text);
+        if normalized.is_empty() || self.canvas.width == 0 || self.canvas.height == 0 {
+            return None;
         }
+
+        let lines = normalized.split('\n').take(self.canvas.height);
+        let mut width = 0;
+        let mut height = 0;
+        for line in lines {
+            height += 1;
+            let line_width = line.chars().fold(0usize, |current, ch| {
+                current
+                    .saturating_add(Canvas::display_width(ch))
+                    .min(self.canvas.width)
+            });
+            width = width.max(line_width);
+        }
+        width = width.max(1);
+
+        let mut canvas = Canvas::with_size(width, height);
+        let editor = EditorSession::default();
+        let _ = editor_paste_text_block(&editor, &mut canvas, &normalized, theme::DEFAULT_GLYPH_FG);
+        Some(editor_capture_bounds_without_color(
+            &canvas,
+            Bounds {
+                min_x: 0,
+                max_x: width - 1,
+                min_y: 0,
+                max_y: height - 1,
+            },
+        ))
+    }
+
+    fn trap_paste_as_stamp(&mut self, text: &str) -> bool {
+        let Some(clipboard) = self.clipboard_from_paste(text) else {
+            return false;
+        };
+        let Some(target) = self
+            .swatches
+            .iter()
+            .position(|swatch| !swatch.as_ref().is_some_and(|swatch| swatch.pinned))
+        else {
+            return false;
+        };
+
+        self.end_paint_stroke();
+        let activation = self.with_editor_session_mut(|editor, _| {
+            editor_dismiss_floating(editor);
+            editor.push_swatch(clipboard);
+            editor.activate_swatch(target)
+        });
+        debug_assert_eq!(activation, SwatchActivation::ActivatedFloating);
+        true
     }
 
     #[cfg(test)]
@@ -1337,8 +1385,17 @@ impl App {
                     self.handle_save_paste(&data);
                     return Vec::new();
                 }
+                if self.emoji_picker_open {
+                    for ch in data.chars().filter(|ch| !ch.is_control()) {
+                        self.handle_picker_key(AppKey {
+                            code: AppKeyCode::Char(ch),
+                            modifiers: AppModifiers::default(),
+                        });
+                    }
+                    return Vec::new();
+                }
                 if !self.show_help {
-                    self.paste_text_block(&data);
+                    self.trap_paste_as_stamp(&data);
                 }
                 Vec::new()
             }
@@ -1914,6 +1971,22 @@ enum FloatingOutcome {
     DismissAndContinue,
 }
 
+fn normalize_paste_line_endings(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    normalized
+}
+
 fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
     editor_diff_canvas_op(before, after, theme::DEFAULT_GLYPH_FG)
 }
@@ -2045,11 +2118,23 @@ mod tests {
     }
 
     #[test]
-    fn bracketed_paste_preserves_multiline_shape() {
+    fn bracketed_paste_enters_history_as_a_multiline_stamp() {
         let mut app = App::new();
         app.cursor = Pos { x: 3, y: 4 };
 
         app.handle_event(Event::Paste(".---.\n|   |\n`---'".to_string()));
+
+        assert_eq!(app.canvas.get(Pos { x: 3, y: 4 }), ' ');
+        let swatch = app.swatches[0].as_ref().expect("paste history entry");
+        assert_eq!((swatch.clipboard.width, swatch.clipboard.height), (5, 3));
+        assert_eq!(swatch.clipboard.get(0, 0), Some(CellValue::Narrow('.')));
+        assert_eq!(swatch.clipboard.get(4, 0), Some(CellValue::Narrow('.')));
+        assert_eq!(swatch.clipboard.get(0, 1), Some(CellValue::Narrow('|')));
+        assert_eq!(swatch.clipboard.get(1, 1), None);
+        assert_eq!(swatch.clipboard.get(4, 1), Some(CellValue::Narrow('|')));
+        assert_eq!(app.floating.as_ref().unwrap().source_index, Some(0));
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.canvas.get(Pos { x: 3, y: 4 }), '.');
         assert_eq!(app.canvas.get(Pos { x: 7, y: 4 }), '.');
@@ -2057,6 +2142,28 @@ mod tests {
         assert_eq!(app.canvas.get(Pos { x: 7, y: 5 }), '|');
         assert_eq!(app.canvas.get(Pos { x: 3, y: 6 }), '`');
         assert_eq!(app.canvas.get(Pos { x: 7, y: 6 }), '\'');
+    }
+
+    #[test]
+    fn pasted_cr_lf_and_crlf_make_the_same_stamp() {
+        let clipboard_for = |text: &str| {
+            let mut app = App::new();
+            app.handle_event(Event::Paste(text.to_string()));
+            let clipboard = &app.swatches[0].as_ref().unwrap().clipboard;
+            (
+                clipboard.width,
+                clipboard.height,
+                clipboard.cells().to_vec(),
+            )
+        };
+
+        let cr = clipboard_for("line1\rline2");
+        let lf = clipboard_for("line1\nline2");
+        let crlf = clipboard_for("line1\r\nline2");
+
+        assert_eq!((cr.0, cr.1), (5, 2));
+        assert_eq!(cr, lf);
+        assert_eq!(lf, crlf);
     }
 
     #[test]
