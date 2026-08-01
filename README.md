@@ -105,10 +105,12 @@ The TUI exposes these core controls in its built-in help:
 - arrow keys to move
 - `Shift` + arrows to create or extend a selection
 - mouse drag to select
+- double-click a glyph to sample it as a transparent brush
 - right-drag or `Alt` + arrows / `Ctrl` + `Shift` + arrows to pan
 - `Ctrl+C`, `Ctrl+X`, `Ctrl+V` for swatch-based copy/cut/paste
 - `Alt+C` to export text to the system clipboard
 - `Ctrl+Z` / `Ctrl+R` for undo / redo
+- `Ctrl+U` / `Ctrl+Y` for the previous / next local paint color
 - `Ctrl+P` to toggle help
 - `Ctrl+Q` to quit
 

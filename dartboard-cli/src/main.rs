@@ -1,5 +1,6 @@
 use std::io::{self, Stdout};
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
@@ -268,15 +269,27 @@ fn run_tui(mut app: App) -> io::Result<()> {
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
-    loop {
-        terminal.draw(|frame| ui::draw(frame, app))?;
-        execute!(io::stdout(), SetCursorStyle::SteadyUnderScore)?;
+    const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
-        let event = crossterm::event::read()?;
-        app.handle_event(event);
+    terminal.draw(|frame| ui::draw(frame, app))?;
+    execute!(io::stdout(), SetCursorStyle::SteadyUnderScore)?;
+
+    loop {
+        let redraw = if crossterm::event::poll(EVENT_POLL_INTERVAL)? {
+            let event = crossterm::event::read()?;
+            app.handle_event(event);
+            true
+        } else {
+            app.tick()
+        };
 
         if app.should_quit {
             return Ok(());
+        }
+
+        if redraw {
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            execute!(io::stdout(), SetCursorStyle::SteadyUnderScore)?;
         }
     }
 }

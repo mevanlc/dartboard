@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crossterm::event::Event;
 #[cfg(test)]
@@ -24,11 +25,11 @@ use dartboard_editor::{
     paste_primary_swatch as editor_paste_primary_swatch, smart_fill as editor_smart_fill,
 };
 use dartboard_editor::{
-    diff_canvas_op as editor_diff_canvas_op, dismiss_floating as editor_dismiss_floating,
-    end_paint_stroke as editor_end_paint_stroke, handle_editor_action as editor_handle_action,
-    handle_editor_pointer as editor_handle_pointer, insert_char as editor_insert_char,
-    paste_text_block as editor_paste_text_block, stamp_floating as editor_stamp_floating,
-    MirrorEvent, PointerStrokeHint, SessionMirror,
+    capture_bounds as editor_capture_bounds, diff_canvas_op as editor_diff_canvas_op,
+    dismiss_floating as editor_dismiss_floating, end_paint_stroke as editor_end_paint_stroke,
+    handle_editor_action as editor_handle_action, handle_editor_pointer as editor_handle_pointer,
+    insert_char as editor_insert_char, paste_text_block as editor_paste_text_block,
+    stamp_floating as editor_stamp_floating, MirrorEvent, PointerStrokeHint, SessionMirror,
 };
 pub use dartboard_editor::{
     export_bounds_as_text as editor_export_bounds_as_text, Bounds, Clipboard, ConnectState,
@@ -49,6 +50,7 @@ pub use crate::input::{
 use crate::theme;
 
 const UNDO_DEPTH_CAP: usize = 500;
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 struct InitialCanvasStore {
     canvas: Canvas,
@@ -262,6 +264,8 @@ struct UserSession {
     emoji_picker_open: bool,
     emoji_picker_state: emoji::EmojiPickerState,
     paint_canvas_before: Option<Canvas>,
+    paint_color_index: Option<usize>,
+    last_canvas_click: Option<(Instant, Pos)>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +300,8 @@ pub struct App {
     pub help_scroll: u16,
     pub save_dialog: Option<SaveDialog>,
     paint_canvas_before: Option<Canvas>,
+    paint_color_index: Option<usize>,
+    last_canvas_click: Option<(Instant, Pos)>,
     paint_stroke_anchor: Option<Pos>,
     paint_stroke_last: Option<Pos>,
     undo_stack: Vec<Canvas>,
@@ -487,6 +493,8 @@ impl App {
             help_scroll: 0,
             save_dialog: None,
             paint_canvas_before: current_session.paint_canvas_before,
+            paint_color_index: current_session.paint_color_index,
+            last_canvas_click: current_session.last_canvas_click,
             paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
             paint_stroke_last: current_session.editor.paint_stroke_last,
             undo_stack: Vec::new(),
@@ -559,6 +567,8 @@ impl App {
             help_scroll: 0,
             save_dialog: None,
             paint_canvas_before: current_session.paint_canvas_before,
+            paint_color_index: current_session.paint_color_index,
+            last_canvas_click: current_session.last_canvas_click,
             paint_stroke_anchor: current_session.editor.paint_stroke_anchor,
             paint_stroke_last: current_session.editor.paint_stroke_last,
             undo_stack: Vec::new(),
@@ -573,7 +583,7 @@ impl App {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(3);
         loop {
-            app.drain_server_events();
+            let _ = app.drain_server_events();
             if let Transport::Remote { mirror, .. } = &app.transport {
                 if mirror.my_user_id.is_some() {
                     break;
@@ -595,6 +605,8 @@ impl App {
             emoji_picker_open: self.emoji_picker_open,
             emoji_picker_state: self.emoji_picker_state.clone(),
             paint_canvas_before: self.paint_canvas_before.clone(),
+            paint_color_index: self.paint_color_index,
+            last_canvas_click: self.last_canvas_click,
         }
     }
 
@@ -605,6 +617,8 @@ impl App {
         self.emoji_picker_open = session.emoji_picker_open;
         self.emoji_picker_state = session.emoji_picker_state;
         self.paint_canvas_before = session.paint_canvas_before;
+        self.paint_color_index = session.paint_color_index;
+        self.last_canvas_click = session.last_canvas_click;
         self.swatch_body_hits = [None; SWATCH_CAPACITY];
         self.swatch_pin_hits = [None; SWATCH_CAPACITY];
     }
@@ -644,6 +658,28 @@ impl App {
 
     pub fn active_user_color(&self) -> RgbColor {
         self.users[self.active_user_idx].user.color
+    }
+
+    pub fn active_paint_color(&self) -> RgbColor {
+        self.paint_color_index
+            .and_then(|idx| theme::PAINT_PALETTE.get(idx).copied())
+            .unwrap_or_else(|| self.active_user_color())
+    }
+
+    pub fn active_paint_color_index(&self) -> usize {
+        self.paint_color_index
+            .or_else(|| {
+                theme::PAINT_PALETTE
+                    .iter()
+                    .position(|color| *color == self.active_user_color())
+            })
+            .unwrap_or(1)
+    }
+
+    fn cycle_paint_color(&mut self, delta: isize) {
+        let len = theme::PAINT_PALETTE.len() as isize;
+        let current = self.active_paint_color_index() as isize;
+        self.paint_color_index = Some((current + delta).rem_euclid(len) as usize);
     }
 
     pub fn cycle_color_mode(&mut self) {
@@ -735,13 +771,15 @@ impl App {
         }
     }
 
-    fn drain_server_events(&mut self) {
+    fn drain_server_events(&mut self) -> bool {
+        let mut dirty = false;
         match &mut self.transport {
             Transport::Embedded { clients, .. } => {
                 for client in clients.iter_mut() {
                     while let Some(msg) = client.try_recv() {
                         if let ServerMsg::OpBroadcast { op, .. } = msg {
                             self.canvas.apply(&op);
+                            dirty = true;
                         }
                     }
                 }
@@ -769,21 +807,25 @@ impl App {
                                     session: UserSession::default(),
                                 });
                             }
+                            dirty = true;
                         }
                         MirrorEvent::RemoteOp { op, .. } => {
                             self.canvas.apply(&op);
+                            dirty = true;
                         }
                         MirrorEvent::PeerJoined(peer) => {
                             self.users.push(LocalSession {
                                 user: peer,
                                 session: UserSession::default(),
                             });
+                            dirty = true;
                         }
                         MirrorEvent::PeerLeft { index, .. } => {
                             // users[0] is self; peers start at index 1.
                             let user_idx = index + 1;
                             if user_idx < self.users.len() {
                                 self.users.remove(user_idx);
+                                dirty = true;
                             }
                         }
                         MirrorEvent::ConnectRejected { .. } => {}
@@ -791,6 +833,7 @@ impl App {
                 }
             }
         }
+        dirty
     }
 
     fn undo(&mut self) {
@@ -905,7 +948,7 @@ impl App {
 
     #[cfg(test)]
     fn cut_selection_or_cell(&mut self) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
             editor_cut_selection_or_cell(editor, canvas, color)
@@ -936,7 +979,7 @@ impl App {
     }
 
     fn stamp_floating(&mut self) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
             editor_stamp_floating(editor, canvas, color)
@@ -966,7 +1009,7 @@ impl App {
 
     #[cfg(test)]
     fn paste_clipboard(&mut self) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
             editor_paste_primary_swatch(editor, canvas, color)
@@ -978,14 +1021,14 @@ impl App {
 
     #[cfg(test)]
     fn smart_fill(&mut self) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let editor = self.editor_session_snapshot();
         self.apply_canvas_edit(|canvas| editor_smart_fill(&editor, canvas, color));
     }
 
     #[cfg(test)]
     fn draw_border(&mut self) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let changed = self.with_editor_and_canvas_mut(|editor, canvas| {
             editor_draw_selection_border(editor, canvas, color)
@@ -997,13 +1040,13 @@ impl App {
 
     #[cfg(test)]
     fn fill_selection_or_cell(&mut self, ch: char) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let editor = self.editor_session_snapshot();
         self.apply_canvas_edit(|canvas| editor_fill_selection_or_cell(&editor, canvas, ch, color));
     }
 
     fn insert_char(&mut self, ch: char) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let _ = self.with_editor_and_canvas_mut(|editor, canvas| {
             editor_insert_char(editor, canvas, ch, color)
@@ -1223,7 +1266,7 @@ impl App {
     }
 
     fn paste_text_block(&mut self, text: &str) {
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let editor = self.editor_session_snapshot();
         let changed = editor_paste_text_block(&editor, &mut self.canvas, text, color);
@@ -1251,8 +1294,8 @@ impl App {
         ) || matches!(key.code, AppKeyCode::Char('\u{1d}'))
     }
 
-    pub fn tick(&mut self) {
-        self.drain_server_events();
+    pub fn tick(&mut self) -> bool {
+        self.drain_server_events()
     }
 
     pub fn handle_event(&mut self, event: Event) {
@@ -1260,14 +1303,14 @@ impl App {
             let effects = self.handle_intent(intent);
             self.apply_host_effects(effects);
         } else {
-            self.tick();
+            let _ = self.tick();
         }
     }
 
     pub fn handle_intent(&mut self, intent: AppIntent) -> Vec<HostEffect> {
         let effects = self.handle_intent_inner(intent);
         self.clamp_cursor();
-        self.tick();
+        let _ = self.tick();
         effects
     }
 
@@ -1377,6 +1420,16 @@ impl App {
             return Vec::new();
         }
 
+        if key.code == AppKeyCode::Char('u') && key.modifiers.ctrl {
+            self.cycle_paint_color(-1);
+            return Vec::new();
+        }
+
+        if key.code == AppKeyCode::Char('y') && key.modifiers.ctrl {
+            self.cycle_paint_color(1);
+            return Vec::new();
+        }
+
         if (key.code == AppKeyCode::Char('p') && key.modifiers.ctrl) || key.code == AppKeyCode::F(1)
         {
             self.show_help = !self.show_help;
@@ -1388,15 +1441,18 @@ impl App {
 
     fn handle_pointer_input(&mut self, mouse: AppPointerEvent) {
         if self.save_dialog.is_some() {
+            self.last_canvas_click = None;
             return;
         }
 
         if self.emoji_picker_open {
+            self.last_canvas_click = None;
             self.handle_picker_mouse(mouse);
             return;
         }
 
         if self.show_help {
+            self.last_canvas_click = None;
             if matches!(mouse.kind, AppPointerKind::Down(AppPointerButton::Left)) {
                 if let Some(tab) = self.help_tab_hit(mouse.column, mouse.row) {
                     if self.help_tab != tab {
@@ -1414,11 +1470,32 @@ impl App {
                     SwatchZone::Pin => self.toggle_pin(idx),
                     SwatchZone::Body => self.activate_swatch(idx),
                 }
+                self.last_canvas_click = None;
                 return;
             }
         }
 
-        let color = self.active_user_color();
+        let sample_candidate = matches!(mouse.kind, AppPointerKind::Down(AppPointerButton::Left))
+            && mouse.modifiers == AppModifiers::default()
+            && self.floating.is_none();
+        if sample_candidate && self.handle_glyph_sample_click(mouse.column, mouse.row) {
+            return;
+        }
+        if !sample_candidate
+            && matches!(
+                mouse.kind,
+                AppPointerKind::Down(_)
+                    | AppPointerKind::Drag(_)
+                    | AppPointerKind::ScrollUp
+                    | AppPointerKind::ScrollDown
+                    | AppPointerKind::ScrollLeft
+                    | AppPointerKind::ScrollRight
+            )
+        {
+            self.last_canvas_click = None;
+        }
+
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let dispatch = self.with_editor_and_canvas_mut(|editor, canvas| {
             editor_handle_pointer(editor, canvas, mouse, color)
@@ -1437,6 +1514,52 @@ impl App {
         if matches!(dispatch.stroke_hint, Some(PointerStrokeHint::End)) {
             self.end_paint_stroke();
         }
+    }
+
+    fn handle_glyph_sample_click(&mut self, column: u16, row: u16) -> bool {
+        let Some(pos) =
+            self.editor_session_snapshot()
+                .canvas_pos_for_pointer(column, row, &self.canvas)
+        else {
+            self.last_canvas_click = None;
+            return false;
+        };
+        let Some(glyph) = self.canvas.glyph_at(pos) else {
+            self.last_canvas_click = None;
+            return false;
+        };
+
+        let now = Instant::now();
+        let is_double_click = self
+            .last_canvas_click
+            .is_some_and(|(previous, previous_pos)| {
+                previous_pos == glyph.pos && now.duration_since(previous) <= DOUBLE_CLICK_WINDOW
+            });
+        if !is_double_click {
+            self.last_canvas_click = Some((now, glyph.pos));
+            return false;
+        }
+
+        self.last_canvas_click = None;
+        let bounds = Bounds {
+            min_x: glyph.pos.x,
+            max_x: glyph.pos.x + glyph.width - 1,
+            min_y: glyph.pos.y,
+            max_y: glyph.pos.y,
+        };
+        let clipboard = editor_capture_bounds(&self.canvas, bounds);
+        self.end_paint_stroke();
+        self.with_editor_session_mut(|editor, _| {
+            editor.clear_selection();
+            editor.cursor = glyph.pos;
+            editor.drag_origin = None;
+            editor.floating = Some(FloatingSelection {
+                clipboard,
+                transparent: true,
+                source_index: None,
+            });
+        });
+        true
     }
 
     fn handle_save_key(&mut self, key: AppKey) {
@@ -1617,7 +1740,7 @@ impl App {
             return Vec::new();
         };
 
-        let color = self.active_user_color();
+        let color = self.active_paint_color();
         let before = self.canvas.clone();
         let dispatch = self.with_editor_and_canvas_mut(|editor, canvas| {
             editor_handle_action(editor, canvas, action, color)
@@ -1797,10 +1920,12 @@ fn diff_canvas_op(before: &Canvas, after: &Canvas) -> Option<CanvasOp> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{
-        App, AppIntent, AppKey, AppKeyCode, AppModifiers, AppPointerEvent, AppPointerKind, HelpTab,
-        HostEffect, Mode, SaveDialog, SaveDialogMode, SaveFocus, SaveFormat, SelectionShape,
-        SWATCH_CAPACITY,
+        App, AppIntent, AppKey, AppKeyCode, AppModifiers, AppPointerButton, AppPointerEvent,
+        AppPointerKind, HelpTab, HostEffect, Mode, SaveDialog, SaveDialogMode, SaveFocus,
+        SaveFormat, SelectionShape, SWATCH_CAPACITY,
     };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2020,6 +2145,57 @@ mod tests {
         }));
 
         assert_eq!(app.viewport_origin, Pos { x: 6, y: 6 });
+    }
+
+    #[test]
+    fn double_clicking_either_half_of_a_wide_glyph_samples_a_transparent_brush() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(2, 3, 10, 8));
+        let source = Pos { x: 4, y: 5 };
+        let source_color = RgbColor::new(12, 34, 56);
+        app.canvas.set_colored(source, '界', source_color);
+
+        for (column, kind) in [
+            (6, AppPointerKind::Down(AppPointerButton::Left)),
+            (6, AppPointerKind::Up(AppPointerButton::Left)),
+            (7, AppPointerKind::Down(AppPointerButton::Left)),
+        ] {
+            let _ = app.handle_intent(AppIntent::Pointer(AppPointerEvent {
+                column,
+                row: 8,
+                kind,
+                modifiers: AppModifiers::default(),
+            }));
+        }
+
+        let floating = app
+            .floating
+            .as_ref()
+            .expect("sampled brush should be armed");
+        assert!(floating.transparent);
+        assert_eq!(floating.source_index, None);
+        assert_eq!(floating.clipboard.width, 2);
+        assert_eq!(floating.clipboard.height, 1);
+        assert_eq!(floating.clipboard.get(0, 0), Some(CellValue::Wide('界')));
+        assert_eq!(floating.clipboard.fg(0, 0), Some(source_color));
+        assert_eq!(app.cursor, source);
+    }
+
+    #[test]
+    fn one_click_does_not_sample_a_glyph() {
+        let mut app = App::new();
+        app.set_viewport(Rect::new(0, 0, 10, 5));
+        app.canvas.set(Pos { x: 2, y: 1 }, 'X');
+
+        let _ = app.handle_intent(AppIntent::Pointer(AppPointerEvent {
+            column: 2,
+            row: 1,
+            kind: AppPointerKind::Down(AppPointerButton::Left),
+            modifiers: AppModifiers::default(),
+        }));
+
+        assert!(app.floating.is_none());
+        assert_eq!(app.cursor, Pos { x: 2, y: 1 });
     }
 
     #[test]
@@ -2532,6 +2708,49 @@ mod tests {
     }
 
     #[test]
+    fn tick_marks_remote_canvas_ops_dirty() {
+        use dartboard_client_ws::{Hello as WsHello, WebsocketClient};
+        use dartboard_core::{CanvasOp, Client};
+        use dartboard_server::{Hello, InMemStore, ServerHandle};
+
+        let server = ServerHandle::spawn_local(InMemStore);
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        server.bind_ws(addr).unwrap();
+        let mut painter = server.connect_local(Hello::new("painter", RgbColor::new(10, 20, 30)));
+        let url = format!("ws://{}", addr);
+        let client =
+            WebsocketClient::connect(&url, WsHello::new("observer", RgbColor::new(1, 2, 3)))
+                .unwrap();
+        let mut app = App::new_remote(client, "observer".into(), RgbColor::new(1, 2, 3));
+        let target = Pos { x: 3, y: 2 };
+        let paint_color = RgbColor::new(90, 80, 70);
+
+        let _ = painter.submit_op(CanvasOp::PaintCell {
+            pos: target,
+            ch: 'X',
+            fg: paint_color,
+        });
+
+        let start = Instant::now();
+        loop {
+            let dirty = app.tick();
+            if app.canvas.get(target) == 'X' {
+                assert!(dirty, "the tick applying a remote op must request redraw");
+                assert_eq!(app.canvas.fg(target), Some(paint_color));
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "remote paint did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn undo_is_enabled_in_embedded_mode() {
         let app = App::new();
         assert!(app.undo_enabled());
@@ -2615,7 +2834,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_cells_take_the_active_user_color() {
+    fn authored_cells_default_to_the_active_user_color() {
         let mut app = App::new();
         let first_color = app.active_user_color();
 
@@ -2630,6 +2849,66 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE));
         assert_eq!(app.canvas.get(Pos { x: 0, y: 0 }), 'B');
         assert_eq!(app.canvas.fg(Pos { x: 0, y: 0 }), Some(second_color));
+    }
+
+    #[test]
+    fn paint_palette_is_local_to_each_embedded_session() {
+        let mut app = App::new();
+        let first_identity = app.active_user_color();
+        let first_start = app.active_paint_color_index();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        )));
+        let first_selection = (first_start + 1) % crate::theme::PAINT_PALETTE.len();
+        assert_eq!(app.active_paint_color_index(), first_selection);
+        assert_eq!(
+            app.active_paint_color(),
+            crate::theme::PAINT_PALETTE[first_selection]
+        );
+        assert_eq!(app.active_user_color(), first_identity);
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        let second_start = app.active_paint_color_index();
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(
+            app.active_paint_color_index(),
+            (second_start + 1) % crate::theme::PAINT_PALETTE.len()
+        );
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(app.active_paint_color_index(), first_selection);
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.canvas.fg(Pos { x: 0, y: 0 }),
+            Some(crate::theme::PAINT_PALETTE[first_selection])
+        );
+    }
+
+    #[test]
+    fn previous_paint_color_wraps_palette() {
+        let mut app = App::new();
+        app.paint_color_index = Some(0);
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(
+            app.active_paint_color_index(),
+            crate::theme::PAINT_PALETTE.len() - 1
+        );
     }
 
     #[test]

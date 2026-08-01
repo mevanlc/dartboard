@@ -24,6 +24,27 @@ pub const PLAYER_PALETTE: [RgbColor; 9] = [
     RgbColor::new(176, 48, 56),
 ];
 
+/// Per-session drawing colors. Unlike `PLAYER_PALETTE`, these do not identify
+/// participants and can be changed without changing the connected user color.
+pub const PAINT_PALETTE: [RgbColor; 16] = [
+    RgbColor::new(255, 110, 64),
+    RgbColor::new(255, 236, 96),
+    RgbColor::new(255, 214, 102),
+    RgbColor::new(145, 226, 88),
+    RgbColor::new(188, 255, 128),
+    RgbColor::new(72, 220, 170),
+    RgbColor::new(86, 245, 214),
+    RgbColor::new(84, 196, 255),
+    RgbColor::new(96, 225, 255),
+    RgbColor::new(128, 163, 255),
+    RgbColor::new(164, 146, 255),
+    RgbColor::new(192, 132, 255),
+    RgbColor::new(224, 116, 255),
+    RgbColor::new(255, 124, 196),
+    RgbColor::new(255, 142, 158),
+    RgbColor::new(238, 242, 255),
+];
+
 pub const PLAYER_COLOR_NAMES: [&str; 9] = [
     "salmon", "amber", "lime", "mint", "sky", "indigo", "violet", "rose", "maroon",
 ];

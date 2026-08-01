@@ -19,7 +19,7 @@ use dartboard_tui::{
     SelectionShape as TuiSelectionShape, SelectionView,
 };
 
-const USER_LIST_MIN_WIDTH: u16 = 12;
+const USER_LIST_MIN_WIDTH: u16 = 20;
 const USER_LIST_MAX_WIDTH: u16 = 24;
 
 const SWATCH_BOX_WIDTH: u16 = 16;
@@ -74,7 +74,7 @@ fn floating_view_from<'a>(app: &'a App, floating: &'a FloatingSelection) -> Floa
         colors: Some(floating.clipboard.colors()),
         anchor: app.cursor,
         transparent: floating.transparent,
-        active_color: app.active_user_color(),
+        active_color: app.active_paint_color(),
     }
 }
 
@@ -675,7 +675,7 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
     let width = (longest_name + 2)
         .clamp(USER_LIST_MIN_WIDTH, USER_LIST_MAX_WIDTH)
         .min(canvas_area.width);
-    let height = (app.users().len() as u16 + 2).min(canvas_area.height);
+    let height = (app.users().len() as u16 + 3).min(canvas_area.height);
     if width < 4 || height < 3 {
         return None;
     }
@@ -723,11 +723,15 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
         return Some(panel);
     }
 
+    let palette_row = (inner.height >= 2).then_some(inner.y + inner.height - 1);
+    let user_height = inner
+        .height
+        .saturating_sub(u16::from(palette_row.is_some()));
     let max_name_width = inner.width as usize;
     let text = Text::from(
         app.users()
             .iter()
-            .take(inner.height as usize)
+            .take(user_height as usize)
             .enumerate()
             .map(|(idx, session)| {
                 let label = truncate_label(&session.user.name, max_name_width.saturating_sub(2));
@@ -751,8 +755,26 @@ fn render_user_list(frame: &mut Frame, canvas_area: Rect, app: &App) -> Option<R
     );
     frame.render_widget(
         Paragraph::new(text).style(Style::default().fg(theme::TEXT)),
-        inner,
+        Rect::new(inner.x, inner.y, inner.width, user_height),
     );
+
+    if let Some(y) = palette_row {
+        let buf = frame.buffer_mut();
+        buf[(inner.x, y)]
+            .set_char('P')
+            .set_style(Style::default().fg(theme::MUTED));
+        for (idx, color) in theme::PAINT_PALETTE.iter().enumerate() {
+            let x = inner.x + 2 + idx as u16;
+            if x >= inner.x + inner.width {
+                break;
+            }
+            let selected = app.active_paint_color_index() == idx;
+            let background = user_color_for_app(app, *color);
+            buf[(x, y)]
+                .set_char(if selected { '•' } else { ' ' })
+                .set_style(Style::default().fg(theme::OOB_BG).bg(background));
+        }
+    }
 
     Some(panel)
 }
@@ -915,10 +937,14 @@ fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
             rows.push(("📌", "pin"));
             rows
         }
-        HelpTab::Transform => keymap_help_rows(&entries, KeyMapHelpSection::Transform),
+        HelpTab::Transform => keymap_help_rows(&entries, KeyMapHelpSection::Transform)
+            .into_iter()
+            .filter(|(keys, _)| !matches!(*keys, "^U" | "^Y"))
+            .collect(),
         HelpTab::Session => vec![
             ("F2", "color mode"),
             ("F3", "color view mode"),
+            ("^U / ^Y", "previous / next paint color"),
             ("^S", "save artboard"),
             ("^Z / ^R", "undo / redo"),
             ("^P", "help toggle"),
@@ -934,8 +960,10 @@ const GUIDE_PROSE: &[&str] = &[
     "Type to fill the selection. Use ^X / ^C / ^V to cut / copy",
     "/ paste into one of five swatches. Click a swatch to use it",
     "as a brush.",
+    "Double-click a canvas glyph to sample a transparent brush.",
     "",
-    "^Q quits the artboard.  ^] opens the emoji / glyph picker.",
+    "^U / ^Y changes your local paint color.  ^] opens the glyph picker.",
+    "^Q quits the artboard.",
     "",
     "^P toggles this help. Tab or ←/→ switches between these",
     "tabs; ↑/↓ (or j/k) scrolls the content of the current help",
